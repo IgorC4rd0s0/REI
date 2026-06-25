@@ -1,0 +1,16 @@
+*.iml
+.gradle/
+.idea/
+local.properties
+build/
+captures/
+.externalNativeBuild/
+.cxx/
+app/build/
+server/config.json
+server/data/
+server/__pycache__/
+.agents/
+.codex/
+.kotlin/
+hs_err_pid*.log
