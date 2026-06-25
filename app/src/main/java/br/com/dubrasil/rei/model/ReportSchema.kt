@@ -115,6 +115,8 @@ object ReportSchema {
             scopedKeys("tecnico", technical) + scopedKeys("estoque", stock) +
             scopedKeys("financeiro", finance) + scopedKeys("fiscal", fiscalReports)
 
+    fun supervisionChecklistItems(): List<String> = scopedKeys("supervisao", supervision)
+
     private fun scopedKeys(scope: String, groups: List<ChecklistGroup>) =
         groups.flatMap { group -> group.items.map { key(scope, group.title, it) } }
 }

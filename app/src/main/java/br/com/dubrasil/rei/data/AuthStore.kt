@@ -1,6 +1,7 @@
 package br.com.dubrasil.rei.data
 
 import android.content.Context
+import br.com.dubrasil.rei.BuildConfig
 
 data class AuthUser(
     val id: Int,
@@ -17,6 +18,11 @@ class AuthStore(context: Context) {
     private val prefs = context.applicationContext.getSharedPreferences("rei_auth", Context.MODE_PRIVATE)
 
     fun token(): String = prefs.getString("token", "").orEmpty()
+    fun serverUrl(): String = prefs.getString("server_url", BuildConfig.CENTRAL_API_URL).orEmpty()
+
+    fun saveServerUrl(value: String) {
+        prefs.edit().putString("server_url", normalizeServerUrl(value)).apply()
+    }
 
     fun currentUser(): AuthUser? {
         val token = token()
@@ -30,8 +36,9 @@ class AuthStore(context: Context) {
         )
     }
 
-    fun save(session: AuthSession) {
+    fun save(session: AuthSession, serverUrl: String = serverUrl()) {
         prefs.edit()
+            .putString("server_url", normalizeServerUrl(serverUrl))
             .putString("token", session.token)
             .putInt("user_id", session.user.id)
             .putString("username", session.user.username)
@@ -40,5 +47,16 @@ class AuthStore(context: Context) {
             .apply()
     }
 
-    fun clear() = prefs.edit().clear().apply()
+    fun clear() {
+        val currentServer = serverUrl()
+        prefs.edit().clear().putString("server_url", currentServer).apply()
+    }
+
+    companion object {
+        fun normalizeServerUrl(value: String): String {
+            val trimmed = value.trim().trimEnd('/')
+            if (trimmed.isBlank()) return ""
+            return if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) trimmed else "http://$trimmed"
+        }
+    }
 }

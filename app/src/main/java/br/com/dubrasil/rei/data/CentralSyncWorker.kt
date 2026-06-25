@@ -30,6 +30,13 @@ class CentralSyncWorker(context: Context, params: WorkerParameters) : Worker(con
                     )
                 }
         }
+        if (!failed) {
+            client.fetchCompletedReports()
+                .onSuccess { remoteReports ->
+                    if (remoteReports.isNotEmpty()) dao.upsertAll(remoteReports)
+                }
+                .onFailure { failed = true }
+        }
         return if (failed) Result.retry() else Result.success()
     }
 }
@@ -39,7 +46,7 @@ object SyncScheduler {
 
     fun enqueue(context: Context) {
         val request = OneTimeWorkRequestBuilder<CentralSyncWorker>()
-            .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
+            .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.UNMETERED).build())
             .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
             .build()
         WorkManager.getInstance(context.applicationContext)

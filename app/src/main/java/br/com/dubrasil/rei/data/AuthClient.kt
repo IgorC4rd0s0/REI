@@ -1,15 +1,15 @@
 package br.com.dubrasil.rei.data
 
 import android.content.Context
-import br.com.dubrasil.rei.BuildConfig
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
 
 class AuthClient(private val context: Context) {
-    fun login(username: String, password: String): Result<AuthSession> = runCatching {
-        require(BuildConfig.CENTRAL_API_URL.isNotBlank()) { "Servidor de autenticação não configurado" }
-        val connection = (URL("${BuildConfig.CENTRAL_API_URL.trimEnd('/')}/api/auth/login").openConnection() as HttpURLConnection).apply {
+    fun login(username: String, password: String, serverUrl: String = AuthStore(context).serverUrl()): Result<AuthSession> = runCatching {
+        val baseUrl = AuthStore.normalizeServerUrl(serverUrl)
+        require(baseUrl.isNotBlank()) { "Servidor de autenticação não configurado" }
+        val connection = (URL("$baseUrl/api/auth/login").openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
             connectTimeout = 7_000
             readTimeout = 10_000
@@ -38,7 +38,7 @@ class AuthClient(private val context: Context) {
                     role = userJson.getString("role")
                 )
             )
-            AuthStore(context).save(session)
+            AuthStore(context).save(session, baseUrl)
             SyncScheduler.enqueue(context)
             session
         } finally {

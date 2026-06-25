@@ -4,7 +4,7 @@ Servidor local do escritório que recebe os relatórios Android e grava os dados
 
 ## Iniciar
 
-Execute `start-server.ps1` no PowerShell. O servidor escuta a porta `8765` em todas as interfaces. O celular precisa estar na mesma rede do computador.
+Execute `start-server.ps1` no PowerShell. O servidor escuta a porta `8765` em todas as interfaces. Para sincronizar no modo recomendado, o celular deve estar no Wi-Fi do escrit?rio. Fora da rede, o app Android trabalha offline e envia os relat?rios pendentes quando voltar para uma rede Wi-Fi com acesso ao servidor.
 
 Para iniciar o servidor automaticamente ao entrar no Windows, execute uma vez `install-autostart.ps1`. Para desfazer, use `uninstall-autostart.ps1`.
 
@@ -22,4 +22,4 @@ No primeiro acesso a `/admin`, cadastre o supervisor inicial. Depois, use esse p
 
 O aplicativo autentica pela sessão do usuário. A rota CSV para BI também aceita o cabeçalho `X-API-Key` configurado em `config.json`. O banco fica em `data/rei_central.db`, utiliza modo WAL e registra quem enviou cada relatório.
 
-Se o IP do computador mudar, atualize `CENTRAL_API_URL` no `local.properties`, recompile o APK e mantenha a porta 8765 liberada no Firewall do Windows para a rede privada.
+Se o IP do computador mudar, informe o novo endere?o na tela de login do app Android. N?o ? necess?rio recompilar o APK apenas para trocar o servidor.

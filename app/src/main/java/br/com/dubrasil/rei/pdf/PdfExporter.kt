@@ -13,6 +13,7 @@ import br.com.dubrasil.rei.R
 import br.com.dubrasil.rei.model.ChecklistGroup
 import br.com.dubrasil.rei.model.ReportData
 import br.com.dubrasil.rei.model.ReportSchema
+import java.io.OutputStream
 import kotlin.math.min
 
 object PdfExporter {
@@ -20,6 +21,12 @@ object PdfExporter {
     private const val PAGE_HEIGHT = 842
 
     fun write(context: Context, uri: Uri, data: ReportData) {
+        context.contentResolver.openOutputStream(uri)?.use { output ->
+            write(context, output, data)
+        }
+    }
+
+    fun write(context: Context, output: OutputStream, data: ReportData) {
         val document = PdfDocument()
         val writer = FormWriter(document, context, data)
 
@@ -63,6 +70,18 @@ object PdfExporter {
             data.field("assinaturaClienteImagem")
         )
 
+        val hasSupervisionEvaluation = data.rating.isNotBlank() ||
+            data.checks.any { it in ReportSchema.supervisionChecklistItems() }
+        if (hasSupervisionEvaluation) {
+            writer.section("AVALIAÇÃO DA SUPERVISÃO")
+            writer.infoTable(listOf(
+                "Supervisor" to data.field("_supervisorName"),
+                "Nota" to data.field("_supervisionScore"),
+                "Parecer / observação" to data.rating
+            ))
+            writer.groups("supervisao", ReportSchema.supervision)
+        }
+
         if (data.attachments.isNotEmpty()) {
             writer.section("EVIDÊNCIAS E ANEXOS", reserveAfter = 70f)
             data.attachments.forEachIndexed { index, attachment ->
@@ -75,7 +94,7 @@ object PdfExporter {
         }
 
         writer.finish()
-        context.contentResolver.openOutputStream(uri)?.use(document::writeTo)
+        document.writeTo(output)
         document.close()
     }
 
@@ -106,7 +125,7 @@ object PdfExporter {
             style = Paint.Style.STROKE
             strokeWidth = 0.8f
         }
-        private val logo = BitmapFactory.decodeResource(context.resources, R.drawable.word_logo)
+        private val logo = BitmapFactory.decodeResource(context.resources, R.drawable.logo_dubrasil)
         private var pageNumber = 0
         private lateinit var page: PdfDocument.Page
         private var y = 0f
@@ -319,7 +338,7 @@ object PdfExporter {
 
         private fun drawPageHeader() {
             val canvas = page.canvas
-            canvas.drawBitmap(logo, null, RectF(left, 24f, left + 112f, 62f), body)
+            canvas.drawBitmap(logo, null, RectF(left, 18f, left + 62f, 70f), body)
             val title = "RELATÓRIO DE ENTREGA DE IMPLANTAÇÃO"
             val titlePaint = paint(12.5f, navyDark, true)
             canvas.drawText(title, right - titlePaint.measureText(title), 39f, titlePaint)

@@ -72,6 +72,26 @@ class ReportRepository(context: Context) {
         }
     }
 
+    fun syncNow() {
+        val client = CentralSyncClient(appContext)
+        var failed = false
+        dao.getPendingSync().forEach { entity ->
+            val attempt = System.currentTimeMillis()
+            client.send(entity)
+                .onSuccess { dao.updateSyncStatus(entity.dbId, ReportEntity.SYNC_SYNCED, attempt, null) }
+                .onFailure { error ->
+                    failed = true
+                    dao.updateSyncStatus(entity.dbId, ReportEntity.SYNC_ERROR, attempt, error.message?.take(500))
+                }
+        }
+        if (!failed) {
+            client.fetchCompletedReports()
+                .onSuccess { remoteReports ->
+                    if (remoteReports.isNotEmpty()) dao.upsertAll(remoteReports)
+                }
+        }
+    }
+
     private fun toSummary(entity: ReportEntity): ImplementationSummary = ImplementationSummary(
         id = entity.reportId,
         client = entity.client,

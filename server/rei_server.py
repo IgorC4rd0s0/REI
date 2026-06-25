@@ -12,13 +12,15 @@ import logging
 import os
 import secrets
 import sqlite3
+import mimetypes
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from http.cookies import SimpleCookie
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote_plus, urlparse
 
 ROOT = Path(__file__).resolve().parent
+WEB_ROOT = ROOT.parent / "web"
 CONFIG_PATH = ROOT / "config.json"
 MAX_BODY_BYTES = 10 * 1024 * 1024
 
@@ -230,7 +232,7 @@ def save_report(payload: dict, created_by_user_id: int | None = None) -> str:
                 completed_at=excluded.completed_at,
                 updated_at=excluded.updated_at,
                 payload_json=excluded.payload_json,
-                created_by_user_id=COALESCE(excluded.created_by_user_id, reports.created_by_user_id)
+                created_by_user_id=COALESCE(reports.created_by_user_id, excluded.created_by_user_id)
             """,
             (
                 report_id, client, str(fields.get("consultor") or ""),
@@ -278,6 +280,33 @@ def reports_csv() -> bytes:
     return output.getvalue().encode("utf-8-sig")
 
 
+def list_reports_for_user(user: dict, limit: int = 100, full: bool = False) -> list[dict]:
+    limit = min(max(limit, 1), 1000)
+    select_payload = ",r.payload_json" if full else ""
+    where = ""
+    params: list[object] = []
+    if user["role"] != "supervisor":
+        where = "WHERE r.created_by_user_id=?"
+        params.append(user["id"])
+    params.append(limit)
+    with connect() as db:
+        rows = []
+        for row in db.execute(
+            "SELECT r.id,r.client,r.consultant,r.started_at,r.ended_at,r.delivery_status,r.checked_items,"
+            "r.completed_at,r.received_at,u.username AS created_by_username,u.full_name AS created_by_name "
+            f"{select_payload} FROM reports r LEFT JOIN users u ON u.id=r.created_by_user_id "
+            f"{where} ORDER BY r.completed_at DESC LIMIT ?",
+            params,
+        ):
+            item = dict(row)
+            if full:
+                payload = json.loads(item.pop("payload_json") or "{}")
+                item["payload"] = payload
+                item["report"] = payload.get("report") or {}
+            rows.append(item)
+    return rows
+
+
 def admin_html(user: dict | None, message: str = "", error: str = "") -> str:
     notice = f'<div class="notice">{html.escape(message)}</div>' if message else ""
     alert = f'<div class="error">{html.escape(error)}</div>' if error else ""
@@ -287,7 +316,7 @@ def admin_html(user: dict | None, message: str = "", error: str = "") -> str:
     :root{--navy:#263a7a;--dark:#172653;--green:#58ad45;--bg:#f4f6fa;--line:#e1e5ee;--muted:#727b90}
     *{box-sizing:border-box}body{margin:0;font-family:Inter,Segoe UI,Arial,sans-serif;background:var(--bg);color:#20283b}
     header{background:#fff;border-bottom:1px solid var(--line);padding:18px 5%;display:flex;align-items:center;justify-content:space-between}
-    .brand{font-size:25px;font-weight:800;color:var(--navy)}.brand small{display:block;font-size:11px;color:var(--muted);letter-spacing:.08em}
+    .brand{display:flex;align-items:center}.brand img{width:58px;height:45px;object-fit:contain;display:block}.login .brand img{width:145px;height:112px}
     main{max-width:1080px;margin:34px auto;padding:0 20px}.hero{background:linear-gradient(135deg,var(--dark),var(--navy));color:#fff;border-radius:24px;padding:28px;margin-bottom:22px}
     .hero h1{margin:0 0 7px}.hero p{margin:0;color:#d7def7}.grid{display:grid;grid-template-columns:360px 1fr;gap:20px}.card{background:#fff;border:1px solid var(--line);border-radius:20px;padding:22px}
     h2{margin:0 0 17px;font-size:19px}label{display:block;font-size:12px;font-weight:700;color:#596174;margin:12px 0 6px}
@@ -300,13 +329,13 @@ def admin_html(user: dict | None, message: str = "", error: str = "") -> str:
     </style></head><body>"""
     base_end = "</main></body></html>"
     if users_count() == 0:
-        return base_start + """<main class="login"><div class="card"><div class="brand">R.E.I.<small>DUBRASIL SOLUÇÕES</small></div>
+        return base_start + """<main class="login"><div class="card"><div class="brand"><img src="/web/assets/logo_dubrasil.png" alt="DuBrasil Soluções"></div>
         <h2 style="margin-top:25px">Criar supervisor inicial</h2><p class="muted">Este primeiro usuário administrará os demais acessos.</p>""" + alert + """
         <form method="post" action="/admin/setup"><label>Nome completo</label><input name="full_name" required minlength="3">
         <label>Usuário</label><input name="username" required minlength="3" autocomplete="username"><label>Senha</label>
         <input type="password" name="password" required minlength="8" autocomplete="new-password"><button class="full">Criar supervisor</button></form></div>""" + base_end
     if not user:
-        return base_start + """<main class="login"><div class="card"><div class="brand">R.E.I.<small>DUBRASIL SOLUÇÕES</small></div>
+        return base_start + """<main class="login"><div class="card"><div class="brand"><img src="/web/assets/logo_dubrasil.png" alt="DuBrasil Soluções"></div>
         <h2 style="margin-top:25px">Acesso administrativo</h2>""" + alert + """<form method="post" action="/admin/login">
         <label>Usuário</label><input name="username" required autocomplete="username"><label>Senha</label>
         <input type="password" name="password" required autocomplete="current-password"><button class="full">Entrar</button></form></div>""" + base_end
@@ -321,7 +350,7 @@ def admin_html(user: dict | None, message: str = "", error: str = "") -> str:
         f"<td><form method='post' action='/admin/users/toggle'><input type='hidden' name='id' value='{row['id']}'>"
         f"<button class='logout'>{'Desativar' if row['active'] else 'Ativar'}</button></form></td></tr>" for row in users
     )
-    return base_start + f"""<header><div class="brand">R.E.I.<small>DUBRASIL SOLUÇÕES</small></div>
+    return base_start + f"""<header><div class="brand"><img src="/web/assets/logo_dubrasil.png" alt="DuBrasil Soluções"></div>
     <form method="post" action="/admin/logout"><button class="logout">Sair</button></form></header><main>
     <div class="hero"><h1>Gestão de usuários</h1><p>Cadastre supervisores e implantadores que terão acesso ao aplicativo.</p></div>{notice}{alert}
     <div class="grid"><section class="card"><h2>Novo usuário</h2><form method="post" action="/admin/users">
@@ -329,6 +358,10 @@ def admin_html(user: dict | None, message: str = "", error: str = "") -> str:
     <label>Perfil</label><select name="role"><option value="implantador">Implantador</option><option value="supervisor">Supervisor</option></select>
     <label>Senha provisória</label><input type="password" name="password" required minlength="8"><button class="full">Cadastrar usuário</button></form></section>
     <section class="card"><h2>Usuários cadastrados</h2><div style="overflow:auto"><table><thead><tr><th>Usuário</th><th>Perfil</th><th>Status</th><th>Ação</th></tr></thead><tbody>{rows}</tbody></table></div></section></div>""" + base_end
+
+
+def admin_query(kind: str, text: str) -> str:
+    return f"/admin?{kind}={quote_plus(text)}"
 
 
 class LegacyReiHandler(BaseHTTPRequestHandler):
@@ -422,6 +455,26 @@ class ReiHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def send_static(self, path: str) -> None:
+        relative = "index.html" if path in {"/web", "/web/"} else path.removeprefix("/web/")
+        target = (WEB_ROOT / relative).resolve()
+        root = WEB_ROOT.resolve()
+        if target != root and root not in target.parents:
+            self.send_json(403, {"error": "acesso negado"})
+            return
+        if not target.exists() or not target.is_file():
+            self.send_json(404, {"error": "arquivo não encontrado"})
+            return
+        body = target.read_bytes()
+        content_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+        if content_type.startswith("text/") or target.suffix in {".js", ".css", ".json", ".svg"}:
+            content_type += "; charset=utf-8"
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def redirect(self, location: str, cookie: str | None = None) -> None:
         self.send_response(303)
         self.send_header("Location", location)
@@ -458,7 +511,13 @@ class ReiHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path == "/":
-            self.redirect("/admin")
+            self.redirect("/web")
+            return
+        if parsed.path == "/app":
+            self.redirect("/web")
+            return
+        if parsed.path == "/web" or parsed.path.startswith("/web/"):
+            self.send_static(parsed.path)
             return
         if parsed.path == "/admin":
             query = parse_qs(parsed.query)
@@ -477,18 +536,16 @@ class ReiHandler(BaseHTTPRequestHandler):
                 self.send_json(200, {"user": user})
             return
         if parsed.path == "/api/reports":
-            if not self.api_supervisor():
-                self.send_json(403, {"error": "acesso exclusivo para supervisor"})
+            user = self.request_user() or self.api_supervisor()
+            if not user:
+                self.send_json(401, {"error": "não autorizado"})
                 return
-            limit = min(max(int(parse_qs(parsed.query).get("limit", [100])[0]), 1), 1000)
-            with connect() as db:
-                rows = [dict(row) for row in db.execute(
-                    "SELECT r.id,r.client,r.consultant,r.started_at,r.ended_at,r.delivery_status,r.checked_items,"
-                    "r.completed_at,r.received_at,u.username AS created_by_username,u.full_name AS created_by_name "
-                    "FROM reports r LEFT JOIN users u ON u.id=r.created_by_user_id "
-                    "ORDER BY r.completed_at DESC LIMIT ?", (limit,)
-                )]
-            self.send_json(200, rows)
+            query = parse_qs(parsed.query)
+            self.send_json(200, list_reports_for_user(
+                user,
+                int(query.get("limit", [100])[0]),
+                query.get("full", ["0"])[0] in {"1", "true", "yes"},
+            ))
             return
         if parsed.path == "/api/bi/reports.csv":
             if not self.api_supervisor():
@@ -508,13 +565,13 @@ class ReiHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/admin/setup":
             if users_count() != 0:
-                self.redirect("/admin?error=Configuração+inicial+já+realizada")
+                self.redirect(admin_query("error", "Configuração inicial já realizada"))
                 return
             try:
                 form = self.read_form()
                 user_id = create_user(form.get("username", ""), form.get("full_name", ""), form.get("password", ""), "supervisor")
                 token = create_session(user_id)
-                self.redirect("/admin?message=Supervisor+criado+com+sucesso", f"rei_session={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000")
+                self.redirect(admin_query("message", "Supervisor criado com sucesso"), f"rei_session={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000")
             except ValueError as error:
                 self.send_html(admin_html(None, error=str(error)), 400)
             return
@@ -534,28 +591,28 @@ class ReiHandler(BaseHTTPRequestHandler):
         if parsed.path == "/admin/users":
             user = self.request_user()
             if not user or user["role"] != "supervisor":
-                self.redirect("/admin?error=Acesso+negado")
+                self.redirect(admin_query("error", "Acesso negado"))
                 return
             try:
                 form = self.read_form()
                 create_user(form.get("username", ""), form.get("full_name", ""), form.get("password", ""), form.get("role", ""))
-                self.redirect("/admin?message=Usuário+cadastrado+com+sucesso")
+                self.redirect(admin_query("message", "Usuário cadastrado com sucesso"))
             except ValueError as error:
-                self.redirect("/admin?error=" + str(error).replace(" ", "+"))
+                self.redirect(admin_query("error", str(error)))
             return
         if parsed.path == "/admin/users/toggle":
             user = self.request_user()
             if not user or user["role"] != "supervisor":
-                self.redirect("/admin?error=Acesso+negado")
+                self.redirect(admin_query("error", "Acesso negado"))
                 return
             form = self.read_form()
             target_id = int(form.get("id", "0"))
             if target_id == user["id"]:
-                self.redirect("/admin?error=Você+não+pode+desativar+seu+próprio+usuário")
+                self.redirect(admin_query("error", "Você não pode desativar seu próprio usuário"))
                 return
             with connect() as db:
                 db.execute("UPDATE users SET active=CASE active WHEN 1 THEN 0 ELSE 1 END,updated_at=? WHERE id=?", (datetime.now(timezone.utc).isoformat(), target_id))
-            self.redirect("/admin?message=Status+atualizado")
+            self.redirect(admin_query("message", "Status atualizado"))
             return
         if parsed.path == "/api/auth/login":
             try:
