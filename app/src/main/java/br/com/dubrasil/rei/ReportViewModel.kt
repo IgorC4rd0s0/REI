@@ -59,9 +59,86 @@ class ReportViewModel(application: Application) : AndroidViewModel(application) 
         val completed = history.firstOrNull { it.id == id } ?: return
         report = completed.report.copy(fields = completed.report.fields + buildMap {
             put("_id", id)
+            put("_stage", "rei")
             if (ownerUsername.isNotBlank()) put("_ownerUsername", ownerUsername)
         })
         repository.clear()
+        repository.save(report)
+    }
+
+    fun createSurveyClient(fields: Map<String, String>, supervisorUsername: String = "") {
+        val id = UUID.randomUUID().toString()
+        val data = ReportData(fields = fields + mapOf(
+            "_id" to id,
+            "_stage" to "levantamento_pendente",
+            "_createdBy" to supervisorUsername
+        ))
+        val summary = ImplementationSummary(
+            id = id,
+            client = data.field("cliente").ifBlank { data.field("empresa").ifBlank { "Cliente não informado" } },
+            consultant = data.field("consultor"),
+            completedAt = System.currentTimeMillis(),
+            deliveryStatus = data.deliveryStatus,
+            checkedItems = 0,
+            report = data
+        )
+        history = (history + summary).sortedByDescending { it.completedAt }
+        repository.saveHistory(history)
+    }
+
+    fun updateSurveyClient(id: String, fields: Map<String, String>, supervisorUsername: String = "") {
+        val item = history.firstOrNull { it.id == id } ?: return
+        val data = item.report.copy(fields = item.report.fields + fields + mapOf(
+            "_id" to id,
+            "_stage" to "levantamento_pendente",
+            "_createdBy" to item.report.field("_createdBy").ifBlank { supervisorUsername }
+        ))
+        val updated = item.copy(
+            client = data.field("cliente").ifBlank { data.field("empresa").ifBlank { "Cliente nÃ£o informado" } },
+            consultant = data.field("consultor"),
+            deliveryStatus = data.deliveryStatus,
+            checkedItems = deliveryChecklistCount(data),
+            report = data
+        )
+        history = (history.filterNot { it.id == id } + updated).sortedByDescending { it.completedAt }
+        repository.saveHistory(history)
+    }
+
+    fun openSurvey(id: String) {
+        val item = history.firstOrNull { it.id == id } ?: return
+        report = item.report.copy(fields = item.report.fields + ("_id" to id))
+    }
+
+    fun saveSurveyDraft() {
+        saveCurrentStage("levantamento_pendente")
+    }
+
+    fun completeSurvey() {
+        saveCurrentStage("rei_pendente")
+        report = ReportData()
+        repository.clear()
+    }
+
+    private fun saveCurrentStage(stage: String) {
+        val id = report.field("_id").ifBlank { UUID.randomUUID().toString() }
+        val data = report.copy(fields = report.fields + mapOf(
+            "_id" to id,
+            "_stage" to stage,
+            "cliente" to report.field("cliente").ifBlank { report.field("empresa") }
+        ))
+        val existing = history.firstOrNull { it.id == id }
+        val summary = ImplementationSummary(
+            id = id,
+            client = data.field("cliente").ifBlank { "Cliente não informado" },
+            consultant = data.field("consultor"),
+            completedAt = existing?.completedAt ?: System.currentTimeMillis(),
+            deliveryStatus = data.deliveryStatus,
+            checkedItems = deliveryChecklistCount(data),
+            report = data
+        )
+        history = (history.filterNot { it.id == id } + summary).sortedByDescending { it.completedAt }
+        repository.saveHistory(history)
+        report = data
         repository.save(report)
     }
 

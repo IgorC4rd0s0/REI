@@ -22,7 +22,7 @@ from urllib.parse import parse_qs, quote_plus, urlparse
 ROOT = Path(__file__).resolve().parent
 WEB_ROOT = ROOT.parent / "web"
 CONFIG_PATH = ROOT / "config.json"
-MAX_BODY_BYTES = 10 * 1024 * 1024
+MAX_BODY_BYTES = 50 * 1024 * 1024
 
 
 def load_config() -> dict:
@@ -194,6 +194,19 @@ def users_count() -> int:
         return int(db.execute("SELECT COUNT(*) FROM users").fetchone()[0])
 
 
+def list_users(role: str | None = None) -> list[dict]:
+    where = "WHERE active=1"
+    params: list[object] = []
+    if role in {"supervisor", "implantador"}:
+        where += " AND role=?"
+        params.append(role)
+    with connect() as db:
+        return [dict(row) for row in db.execute(
+            f"SELECT id, username, full_name, role FROM users {where} ORDER BY full_name, username",
+            params,
+        )]
+
+
 def save_report(payload: dict, created_by_user_id: int | None = None) -> str:
     report_id = str(payload.get("reportId") or "").strip()
     report = payload.get("report") or {}
@@ -283,26 +296,34 @@ def reports_csv() -> bytes:
 def list_reports_for_user(user: dict, limit: int = 100, full: bool = False) -> list[dict]:
     limit = min(max(limit, 1), 1000)
     select_payload = ",r.payload_json" if full else ""
-    where = ""
-    params: list[object] = []
-    if user["role"] != "supervisor":
-        where = "WHERE r.created_by_user_id=?"
-        params.append(user["id"])
-    params.append(limit)
+    params: list[object] = [limit]
     with connect() as db:
         rows = []
         for row in db.execute(
             "SELECT r.id,r.client,r.consultant,r.started_at,r.ended_at,r.delivery_status,r.checked_items,"
             "r.completed_at,r.received_at,u.username AS created_by_username,u.full_name AS created_by_name "
             f"{select_payload} FROM reports r LEFT JOIN users u ON u.id=r.created_by_user_id "
-            f"{where} ORDER BY r.completed_at DESC LIMIT ?",
+            "ORDER BY r.completed_at DESC LIMIT ?",
             params,
         ):
             item = dict(row)
             if full:
                 payload = json.loads(item.pop("payload_json") or "{}")
+                fields = (payload.get("report") or {}).get("fields") or {}
+                if user["role"] != "supervisor":
+                    username = str(user["username"]).strip().lower()
+                    created_by = str(item.get("created_by_username") or "").strip().lower()
+                    owner = str(fields.get("_ownerUsername") or "").strip().lower()
+                    assigned = str(fields.get("_assignedImplantadorUsername") or "").strip().lower()
+                    stage = str(fields.get("_stage") or "").strip()
+                    if stage == "levantamento_pendente" and assigned and assigned != username:
+                        continue
+                    if stage != "levantamento_pendente" and username not in {created_by, owner, assigned}:
+                        continue
                 item["payload"] = payload
                 item["report"] = payload.get("report") or {}
+            elif user["role"] != "supervisor" and str(item.get("created_by_username") or "").strip().lower() != str(user["username"]).strip().lower():
+                continue
             rows.append(item)
     return rows
 
@@ -312,11 +333,14 @@ def admin_html(user: dict | None, message: str = "", error: str = "") -> str:
     alert = f'<div class="error">{html.escape(error)}</div>' if error else ""
     base_start = """<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1"><title>R.E.I. • Usuários</title>
+    <link rel="icon" href="/web/assets/favicon.ico" sizes="any">
+    <link rel="icon" type="image/png" href="/web/assets/favicon-192.png">
+    <link rel="apple-touch-icon" href="/web/assets/favicon-192.png">
     <style>
     :root{--navy:#263a7a;--dark:#172653;--green:#58ad45;--bg:#f4f6fa;--line:#e1e5ee;--muted:#727b90}
     *{box-sizing:border-box}body{margin:0;font-family:Inter,Segoe UI,Arial,sans-serif;background:var(--bg);color:#20283b}
     header{background:#fff;border-bottom:1px solid var(--line);padding:18px 5%;display:flex;align-items:center;justify-content:space-between}
-    .brand{display:flex;align-items:center}.brand img{width:58px;height:45px;object-fit:contain;display:block}.login .brand img{width:145px;height:112px}
+    .brand{display:flex;align-items:center}.brand img{width:46px;height:46px;object-fit:contain;display:block}.login .brand img{width:128px;height:128px}
     main{max-width:1080px;margin:34px auto;padding:0 20px}.hero{background:linear-gradient(135deg,var(--dark),var(--navy));color:#fff;border-radius:24px;padding:28px;margin-bottom:22px}
     .hero h1{margin:0 0 7px}.hero p{margin:0;color:#d7def7}.grid{display:grid;grid-template-columns:360px 1fr;gap:20px}.card{background:#fff;border:1px solid var(--line);border-radius:20px;padding:22px}
     h2{margin:0 0 17px;font-size:19px}label{display:block;font-size:12px;font-weight:700;color:#596174;margin:12px 0 6px}
@@ -471,6 +495,7 @@ class ReiHandler(BaseHTTPRequestHandler):
             content_type += "; charset=utf-8"
         self.send_response(200)
         self.send_header("Content-Type", content_type)
+        self.send_header("Cache-Control", "no-store, max-age=0")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -546,6 +571,15 @@ class ReiHandler(BaseHTTPRequestHandler):
                 int(query.get("limit", [100])[0]),
                 query.get("full", ["0"])[0] in {"1", "true", "yes"},
             ))
+            return
+        if parsed.path == "/api/users":
+            user = self.request_user()
+            if not user or user["role"] != "supervisor":
+                self.send_json(403, {"error": "acesso exclusivo para supervisor"})
+                return
+            query = parse_qs(parsed.query)
+            role = query.get("role", [""])[0]
+            self.send_json(200, list_users(role if role else None))
             return
         if parsed.path == "/api/bi/reports.csv":
             if not self.api_supervisor():

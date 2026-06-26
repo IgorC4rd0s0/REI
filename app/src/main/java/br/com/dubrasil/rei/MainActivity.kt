@@ -61,6 +61,8 @@ import androidx.compose.material.icons.outlined.Person
 import androidx.compose.material.icons.outlined.PhotoLibrary
 import androidx.compose.material.icons.outlined.PictureAsPdf
 import androidx.compose.material.icons.outlined.PhotoCamera
+import androidx.compose.material.icons.outlined.Save
+import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Timer
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.CloudDone
@@ -139,9 +141,11 @@ import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
 import java.time.Instant
+import java.time.LocalDate
 import java.time.YearMonth
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import java.time.temporal.ChronoUnit
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -151,6 +155,15 @@ class MainActivity : ComponentActivity() {
 }
 
 private data class Step(val title: String, val shortTitle: String, val description: String)
+private data class DashboardGroup(
+    val key: String,
+    val title: String,
+    val value: Int,
+    val subtitle: String,
+    val icon: String,
+    val items: List<ImplementationSummary>,
+    val emptyText: String
+)
 
 private val steps = listOf(
     Step("Identificação", "Dados", "Informações gerais e módulos contratados"),
@@ -160,6 +173,80 @@ private val steps = listOf(
     Step("Fiscal e relatórios", "Fiscal", "Obrigações fiscais e relatórios"),
     Step("Entrega e assinaturas", "Entrega", "Conclusão, evidências e responsáveis")
 )
+
+private enum class SurveyFieldType { Text, TextArea, Choice }
+private data class SurveyFieldDef(
+    val key: String,
+    val label: String,
+    val type: SurveyFieldType = SurveyFieldType.Text,
+    val options: List<String> = emptyList(),
+    val minLines: Int = 1
+)
+private data class SurveySectionDef(val title: String, val fields: List<SurveyFieldDef>)
+
+private val yesNoOptions = listOf("Sim", "Não")
+private val surveySections = listOf(
+    SurveySectionDef("Levantamento de dados – Implantação TGA", listOf(
+        SurveyFieldDef("empresa", "Empresa"),
+        SurveyFieldDef("contato", "Contato"),
+        SurveyFieldDef("telefone", "Tel/Cel"),
+        SurveyFieldDef("email", "E-mail"),
+        SurveyFieldDef("cnpj", "CNPJ"),
+        SurveyFieldDef("inscricaoEstadual", "Insc. Estadual"),
+        SurveyFieldDef("analistaLevantamento", "Analista responsável pelo levantamento"),
+        SurveyFieldDef("presentesReuniao", "Presentes na reunião", SurveyFieldType.TextArea, minLines = 2)
+    )),
+    SurveySectionDef("Financeiro", listOf(
+        SurveyFieldDef("financeiroCentroCusto", "Centro de custo", SurveyFieldType.Choice, listOf("Importar", "Usar padrão")),
+        SurveyFieldDef("financeiroFormasPagamento", "Formas de pagamento", SurveyFieldType.TextArea, minLines = 3),
+        SurveyFieldDef("financeiroContasPagarReceber", "Gerencia Contas a pagar/receber?", SurveyFieldType.Choice, yesNoOptions),
+        SurveyFieldDef("financeiroFluxoCaixa", "Utiliza Fluxo de caixa?", SurveyFieldType.Choice, yesNoOptions),
+        SurveyFieldDef("financeiroConciliacao", "Utiliza Conciliação bancária?", SurveyFieldType.Choice, yesNoOptions),
+        SurveyFieldDef("financeiroCartao", "Utiliza Controle de cartão?", SurveyFieldType.Choice, yesNoOptions),
+        SurveyFieldDef("financeiroCartaoMaquina", "Qual máquina utilizada?"),
+        SurveyFieldDef("financeiroCheque", "Utiliza Controle de cheque?", SurveyFieldType.Choice, yesNoOptions),
+        SurveyFieldDef("financeiroDescontoTitulo", "Utiliza Desconto de Título?", SurveyFieldType.Choice, yesNoOptions),
+        SurveyFieldDef("financeiroPrevisaoFutura", "Utiliza Previsão futura de Contas a Pagar?", SurveyFieldType.Choice, yesNoOptions),
+        SurveyFieldDef("financeiroParticularidades", "Particularidades perfil financeiro", SurveyFieldType.TextArea, minLines = 4)
+    )),
+    SurveySectionDef("Estoque", listOf(
+        SurveyFieldDef("estoquePdv", "Utiliza PDV?", SurveyFieldType.Choice, listOf("Online", "Offline")),
+        SurveyFieldDef("estoqueDevolucao", "Utiliza devolução de compra e venda?", SurveyFieldType.Choice, yesNoOptions),
+        SurveyFieldDef("estoqueSerieNf", "Série da Nota Fiscal"),
+        SurveyFieldDef("estoqueTiposNotas", "Quais tipos de notas emitidas sem ser venda", SurveyFieldType.TextArea, minLines = 3),
+        SurveyFieldDef("estoqueParticularidades", "Particularidades perfil estoque", SurveyFieldType.TextArea, minLines = 4),
+        SurveyFieldDef("estoqueComissao", "Utiliza comissão?", SurveyFieldType.Choice, yesNoOptions),
+        SurveyFieldDef("estoqueComissaoPagamento", "Se SIM, pagamento sobre?", SurveyFieldType.Choice, listOf("Recebimento", "Faturamento")),
+        SurveyFieldDef("estoqueOrdemServico", "Utiliza Ordem de serviço?", SurveyFieldType.Choice, yesNoOptions),
+        SurveyFieldDef("estoqueControlaEstoque", "Controla Estoque?", SurveyFieldType.Choice, yesNoOptions),
+        SurveyFieldDef("estoqueDetalhes", "Detalhes", SurveyFieldType.TextArea, minLines = 5),
+        SurveyFieldDef("estoqueFormacaoPreco", "Utiliza formação de preço?", SurveyFieldType.Choice, yesNoOptions),
+        SurveyFieldDef("estoqueCertificado", "Utiliza qual certificado?", SurveyFieldType.Choice, listOf("A1", "A3")),
+        SurveyFieldDef("estoqueEmailNf", "Qual e-mail para envio NF?"),
+        SurveyFieldDef("estoqueBalanca", "Utiliza balança?", SurveyFieldType.Choice, yesNoOptions),
+        SurveyFieldDef("estoqueLote", "Utiliza controle de lote?", SurveyFieldType.Choice, yesNoOptions),
+        SurveyFieldDef("estoqueComposicao", "Utiliza composição?", SurveyFieldType.Choice, yesNoOptions),
+        SurveyFieldDef("estoqueSimilar", "Utiliza similar?", SurveyFieldType.Choice, yesNoOptions),
+        SurveyFieldDef("estoqueSerieProduto", "Utiliza controle de série cadastro produto?", SurveyFieldType.Choice, yesNoOptions)
+    )),
+    SurveySectionDef("Gerais", listOf(
+        SurveyFieldDef("geralAgendamento", "A implantação pode ser agendada em qualquer período?", SurveyFieldType.Choice, yesNoOptions),
+        SurveyFieldDef("geralRelatorios", "Relatórios: Quais relatórios são utilizados ao longo do mês?", SurveyFieldType.TextArea, minLines = 5),
+        SurveyFieldDef("geralWorkflow", "Workflow", SurveyFieldType.TextArea, minLines = 5),
+        SurveyFieldDef("geralCustomizacao", "Customização", SurveyFieldType.TextArea, minLines = 3)
+    )),
+    SurveySectionDef("Movimentos de entrada", listOf(SurveyFieldDef("movimentosEntrada", "Movimentos de entrada", SurveyFieldType.TextArea, minLines = 5))),
+    SurveySectionDef("Movimentos de saída", listOf(SurveyFieldDef("movimentosSaida", "Movimentos de saída", SurveyFieldType.TextArea, minLines = 5))),
+    SurveySectionDef("Anotações", listOf(SurveyFieldDef("anotacoes", "Anotações", SurveyFieldType.TextArea, minLines = 5))),
+    SurveySectionDef("Fluxograma inicial", listOf(SurveyFieldDef("fluxogramaInicial", "Fluxograma inicial", SurveyFieldType.TextArea, minLines = 5)))
+)
+
+private fun surveyTabTitle(title: String): String = when {
+    title.startsWith("Levantamento", ignoreCase = true) -> "Identificação"
+    title.equals("Movimentos de entrada", ignoreCase = true) -> "Entrada"
+    title.startsWith("Movimentos de sa", ignoreCase = true) -> "Saída"
+    else -> title
+}
 
 private val Navy = Color(0xFF263A7A)
 private val NavyDark = Color(0xFF172653)
@@ -176,8 +263,11 @@ private fun ReiApp(vm: ReportViewModel = viewModel()) {
     val report = vm.report
     var showDashboard by rememberSaveable { mutableStateOf(currentUser != null) }
     var viewingReportId by rememberSaveable { mutableStateOf<String?>(null) }
+    var surveyReportId by rememberSaveable { mutableStateOf<String?>(null) }
     var currentStep by rememberSaveable { mutableIntStateOf(0) }
     var confirmClear by rememberSaveable { mutableStateOf(false) }
+    var showNewClientDialog by rememberSaveable { mutableStateOf(false) }
+    var editingClientId by rememberSaveable { mutableStateOf<String?>(null) }
     var pendingCameraUri by rememberSaveable { mutableStateOf<String?>(null) }
 
     if (currentUser == null) {
@@ -249,6 +339,28 @@ private fun ReiApp(vm: ReportViewModel = viewModel()) {
     }
 
     val viewedReport = viewingReportId?.let { id -> vm.history.firstOrNull { it.id == id } }
+    val surveyItem = surveyReportId?.let { id -> vm.history.firstOrNull { it.id == id } }
+    if (surveyItem != null) {
+        LaunchedEffect(surveyItem.id) { vm.openSurvey(surveyItem.id) }
+        SurveyScreen(
+            data = report,
+            vm = vm,
+            onBack = { surveyReportId = null },
+            onSave = {
+                vm.saveSurveyDraft()
+                surveyReportId = null
+                showDashboard = true
+                Toast.makeText(context, "Levantamento salvo", Toast.LENGTH_LONG).show()
+            },
+            onComplete = {
+                vm.completeSurvey()
+                surveyReportId = null
+                showDashboard = true
+                Toast.makeText(context, "Levantamento concluído. Implantação liberada para R.E.I.", Toast.LENGTH_LONG).show()
+            }
+        )
+        return
+    }
     if (viewedReport != null) {
         ReportViewerScreen(
             item = viewedReport,
@@ -258,15 +370,18 @@ private fun ReiApp(vm: ReportViewModel = viewModel()) {
                 viewingReportId = null
                 currentStep = 0
                 showDashboard = false
+            }) else if (viewedReport.stage() == "levantamento_pendente") ({
+                editingClientId = viewedReport.id
+                viewingReportId = null
+                showNewClientDialog = true
             }) else null,
-            onEvaluate = if (authenticatedUser.isSupervisor) ({ score, rating, supervisionChecks ->
+            onEvaluate = if (authenticatedUser.isSupervisor && viewedReport.isReadyForSupervisorEvaluation()) ({ score, rating, supervisionChecks ->
                 vm.saveSupervisorEvaluation(viewedReport.id, authenticatedUser.username, score, rating, supervisionChecks)
                 Toast.makeText(context, "Avaliação da supervisão salva", Toast.LENGTH_LONG).show()
             }) else null,
-            onReprint = {
-                val safeName = viewedReport.client.replace(Regex("[^A-Za-zÀ-ÿ0-9_-]"), "_")
-                exportAndSharePdf("REI_${safeName}_segunda_via.pdf", viewedReport.report, false)
-            }
+            onReprint = if (viewedReport.isReadyForSupervisorEvaluation() && !viewedReport.isSurveyStage()) ({
+                exportAndSharePdf(reportPdfFileName(viewedReport.client), viewedReport.report, false)
+            }) else null
         )
         return
     }
@@ -279,7 +394,29 @@ private fun ReiApp(vm: ReportViewModel = viewModel()) {
             onLogout = logout,
             onResumeDraft = { currentStep = 0; showDashboard = false },
             onNewReport = { vm.startNewReport(authenticatedUser.username); currentStep = 0; showDashboard = false },
-            onOpenReport = { viewingReportId = it.id }
+            onOpenReport = {
+                if (!authenticatedUser.isSupervisor && it.stage() == "rei_pendente") {
+                    vm.editCompletedReport(it.id, authenticatedUser.username)
+                    currentStep = 0
+                    showDashboard = false
+                } else {
+                    viewingReportId = it.id
+                }
+            },
+            onOpenSurvey = { surveyReportId = it.id },
+            onNewClient = { editingClientId = null; showNewClientDialog = true }
+        )
+        if (showNewClientDialog) NewClientDialog(
+            initialFields = editingClientId?.let { id -> vm.history.firstOrNull { it.id == id }?.report?.fields }.orEmpty(),
+            onDismiss = { showNewClientDialog = false; editingClientId = null },
+            onSave = { fields ->
+                editingClientId?.let { id ->
+                    vm.updateSurveyClient(id, fields, authenticatedUser.username)
+                } ?: vm.createSurveyClient(fields, authenticatedUser.username)
+                showNewClientDialog = false
+                editingClientId = null
+                Toast.makeText(context, "Cliente salvo e enviado para levantamento", Toast.LENGTH_LONG).show()
+            }
         )
         return
     }
@@ -296,15 +433,28 @@ private fun ReiApp(vm: ReportViewModel = viewModel()) {
         bottomBar = {
             BottomActions(
                 currentStep = currentStep,
+                canExport = report.isConcludedDelivery(),
                 onBack = { currentStep-- },
                 onNext = { currentStep++ },
+                onSaveOnly = {
+                    if (report.field("cliente").isBlank()) {
+                        Toast.makeText(context, "Informe o cliente/projeto antes de salvar", Toast.LENGTH_LONG).show()
+                        currentStep = 0
+                    } else {
+                        vm.archiveCurrentReport()
+                        showDashboard = true
+                        Toast.makeText(context, "Implantação salva para acompanhamento", Toast.LENGTH_LONG).show()
+                    }
+                },
                 onExport = {
                     if (report.field("cliente").isBlank()) {
                         Toast.makeText(context, "Informe o cliente/projeto antes de exportar", Toast.LENGTH_LONG).show()
                         currentStep = 0
+                    } else if (!report.isConcludedDelivery()) {
+                        Toast.makeText(context, "Sinalize a implantação como concluída antes de gerar o PDF", Toast.LENGTH_LONG).show()
+                        currentStep = steps.lastIndex
                     } else {
-                        val safeName = report.field("cliente").replace(Regex("[^A-Za-zÀ-ÿ0-9_-]"), "_")
-                        exportAndSharePdf("REI_$safeName.pdf", report, true)
+                        exportAndSharePdf(reportPdfFileName(report.field("cliente")), report, true)
                     }
                 }
             )
@@ -369,6 +519,18 @@ private fun ReiApp(vm: ReportViewModel = viewModel()) {
         dismissButton = { TextButton(onClick = { confirmClear = false }) { Text("Cancelar") } },
         shape = RoundedCornerShape(24.dp)
     )
+    if (showNewClientDialog) NewClientDialog(
+        initialFields = editingClientId?.let { id -> vm.history.firstOrNull { it.id == id }?.report?.fields }.orEmpty(),
+        onDismiss = { showNewClientDialog = false; editingClientId = null },
+        onSave = { fields ->
+            editingClientId?.let { id ->
+                vm.updateSurveyClient(id, fields, authenticatedUser.username)
+            } ?: vm.createSurveyClient(fields, authenticatedUser.username)
+            showNewClientDialog = false
+            editingClientId = null
+            Toast.makeText(context, "Cliente salvo e enviado para levantamento", Toast.LENGTH_LONG).show()
+        }
+    )
 }
 
 @Composable
@@ -380,6 +542,7 @@ private fun LoginScreen(onAuthenticated: (AuthUser) -> Unit) {
     var username by rememberSaveable { mutableStateOf("") }
     var password by rememberSaveable { mutableStateOf("") }
     var serverUrl by rememberSaveable { mutableStateOf(authStore.serverUrl()) }
+    var showConnectionSettings by rememberSaveable { mutableStateOf(false) }
     var loading by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf("") }
 
@@ -399,7 +562,7 @@ private fun LoginScreen(onAuthenticated: (AuthUser) -> Unit) {
                 Image(
                     painter = painterResource(R.drawable.logo_dubrasil),
                     contentDescription = "DuBrasil Soluções",
-                    modifier = Modifier.width(145.dp).height(112.dp),
+                    modifier = Modifier.size(128.dp),
                     contentScale = ContentScale.Fit
                 )
                 Spacer(Modifier.height(22.dp))
@@ -407,20 +570,43 @@ private fun LoginScreen(onAuthenticated: (AuthUser) -> Unit) {
                     Icon(Icons.Outlined.Lock, null, tint = Navy, modifier = Modifier.size(27.dp))
                 }
                 Spacer(Modifier.height(13.dp))
-                Text("Acesso ao R.E.I.", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
-                Text("Entre com o usuário cadastrado pelo supervisor.", style = MaterialTheme.typography.bodySmall, color = Color(0xFF778095))
-                Spacer(Modifier.height(22.dp))
-                OutlinedTextField(
-                    value = serverUrl,
-                    onValueChange = { serverUrl = it; error = "" },
-                    label = { Text("Endereço do servidor") },
-                    leadingIcon = { Icon(Icons.Outlined.BusinessCenter, null) },
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(15.dp)
-                )
-                Spacer(Modifier.height(10.dp))
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Spacer(Modifier.width(42.dp))
+                    Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text("Acesso ao R.E.I.", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+                        Text("Entre com o usuário cadastrado pelo supervisor.", style = MaterialTheme.typography.bodySmall, color = Color(0xFF778095))
+                    }
+                    IconButton(
+                        onClick = { showConnectionSettings = !showConnectionSettings },
+                        modifier = Modifier.size(42.dp).clip(CircleShape).background(Color(0xFFF0F2F7))
+                    ) {
+                        Icon(Icons.Outlined.Settings, contentDescription = "Configurar conexão", tint = Navy)
+                    }
+                }
+                Spacer(Modifier.height(16.dp))
+                if (showConnectionSettings) {
+                    OutlinedTextField(
+                        value = serverUrl,
+                        onValueChange = {
+                            serverUrl = it
+                            authStore.saveServerUrl(it)
+                            error = ""
+                        },
+                        label = { Text("Endereço do servidor") },
+                        leadingIcon = { Icon(Icons.Outlined.BusinessCenter, null) },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(15.dp)
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        "Use apenas para trocar o servidor. Se já acessou antes, o login funciona offline no celular.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color(0xFF778095)
+                    )
+                    Spacer(Modifier.height(10.dp))
+                }
                 OutlinedTextField(
                     value = username,
                     onValueChange = { username = it; error = "" },
@@ -449,7 +635,7 @@ private fun LoginScreen(onAuthenticated: (AuthUser) -> Unit) {
                 Spacer(Modifier.height(17.dp))
                 Button(
                     onClick = {
-                        if (serverUrl.isBlank() || username.isBlank() || password.isBlank()) {
+                        if (username.isBlank() || password.isBlank()) {
                             error = "Informe usuário e senha."
                         } else {
                             loading = true
@@ -481,14 +667,15 @@ private fun DashboardScreen(
     onLogout: () -> Unit,
     onResumeDraft: () -> Unit,
     onNewReport: () -> Unit,
-    onOpenReport: (ImplementationSummary) -> Unit
+    onOpenReport: (ImplementationSummary) -> Unit,
+    onOpenSurvey: (ImplementationSummary) -> Unit,
+    onNewClient: () -> Unit
 ) {
-    val ordered = history.sortedBy { it.completedAt }
-    val averageDays = if (ordered.size >= 2) {
-        ordered.zipWithNext { first, second ->
-            (second.completedAt - first.completedAt).toDouble() / 86_400_000.0
-        }.average()
-    } else null
+    val averageDays = history
+        .filter { it.isReadyForSupervisorEvaluation() }
+        .mapNotNull { it.implementationDurationDays() }
+        .takeIf { it.isNotEmpty() }
+        ?.average()
     val hasDraft = draft.fields.any { (key, value) -> key != "_id" && value.isNotBlank() } ||
         draft.checks.isNotEmpty() || draft.attachments.isNotEmpty() || draft.deliveryStatus.isNotBlank()
     val evaluations = history.filter { hasSupervisorEvaluation(it.report) }
@@ -496,11 +683,47 @@ private fun DashboardScreen(
     val lastDate = history.maxByOrNull { it.completedAt }?.let {
         SimpleDateFormat("dd/MM/yyyy", Locale("pt", "BR")).format(Date(it.completedAt))
     } ?: "—"
+    var selectedDashboardFilter by rememberSaveable(user.username) { mutableStateOf("levantamentos") }
+    val allSurveyPending = history.filter { it.stage() == "levantamento_pendente" }
+    val surveyPending = if (user.isSupervisor) allSurveyPending else allSurveyPending.filter { it.isAssignedTo(user.username) }
+    val reiPending = if (user.isSupervisor) {
+        history.filter { it.stage() == "rei_pendente" }
+    } else {
+        history.filter { it.stage() == "rei_pendente" && it.isAssignedTo(user.username) }
+    }
+    val reiReports = history.filterNot { it.isSurveyStage() }
+    val inProgress = reiReports.filterNot { it.isReadyForSupervisorEvaluation() }
+    val concluded = reiReports.filter { it.isReadyForSupervisorEvaluation() }
+    val dashboardGroups = listOf(
+        DashboardGroup("levantamentos", "Levantamentos pendentes", surveyPending.size, if (user.isSupervisor) "Clientes aguardando levantamento" else "Disponíveis para preencher", "file", surveyPending, "Nenhum levantamento pendente."),
+        DashboardGroup("pendentes", "Implantações pendentes", reiPending.size, "R.E.I. liberado para iniciar", "briefcase", reiPending, "Nenhuma implantação pendente para iniciar o R.E.I."),
+        DashboardGroup("andamento", "Implantações em andamento", inProgress.size, "Iniciadas e ainda não concluídas", "timer", inProgress, "Nenhuma implantação em andamento."),
+        DashboardGroup("concluidas", "Implantações concluídas", concluded.size, "Disponíveis para visualização/PDF", "calendar", concluded, "Nenhuma implantação concluída.")
+    )
+    val activeDashboardGroup = dashboardGroups.firstOrNull { it.key == selectedDashboardFilter } ?: dashboardGroups.first()
 
     Scaffold(
         containerColor = PageBackground,
         topBar = { DashboardHeader(user, onLogout) },
         bottomBar = {
+            if (user.isSupervisor) {
+                Surface(
+                    modifier = Modifier.navigationBarsPadding(),
+                    color = Color.White,
+                    shadowElevation = 12.dp
+                ) {
+                    Button(
+                        onClick = onNewClient,
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 12.dp).height(54.dp),
+                        shape = RoundedCornerShape(17.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = Navy)
+                    ) {
+                        Icon(Icons.Outlined.Add, null, Modifier.size(24.dp))
+                        Spacer(Modifier.width(9.dp))
+                        Text("Cadastrar cliente", fontWeight = FontWeight.Bold)
+                    }
+                }
+            } else {
             Surface(
                 modifier = Modifier.navigationBarsPadding(),
                 color = Color.White,
@@ -516,6 +739,7 @@ private fun DashboardScreen(
                     Spacer(Modifier.width(9.dp))
                     Text("Nova implantação", fontWeight = FontWeight.Bold)
                 }
+            }
             }
         }
     ) { padding ->
@@ -545,7 +769,7 @@ private fun DashboardScreen(
                     modifier = Modifier.weight(1f),
                     icon = { Icon(Icons.Outlined.Timer, null, tint = Green) },
                     value = averageDays?.let { String.format(Locale("pt", "BR"), "%.1f dias", it) } ?: "—",
-                    label = "Intervalo médio"
+                    label = "Média de dias gastos"
                 )
             }
             if (!user.isSupervisor) {
@@ -584,6 +808,32 @@ private fun DashboardScreen(
                 }
             }
             Spacer(Modifier.height(18.dp))
+            Text("Acompanhamento", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = Color(0xFF1B2437))
+            Spacer(Modifier.height(12.dp))
+            dashboardGroups.chunked(2).forEach { rowGroups ->
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    rowGroups.forEach { group ->
+                        WorkflowSummaryCard(
+                            modifier = Modifier.weight(1f),
+                            group = group,
+                            active = group.key == activeDashboardGroup.key,
+                            onClick = { selectedDashboardFilter = group.key }
+                        )
+                    }
+                    if (rowGroups.size == 1) Spacer(Modifier.weight(1f))
+                }
+                Spacer(Modifier.height(12.dp))
+            }
+            HistorySection(
+                title = activeDashboardGroup.title,
+                items = activeDashboardGroup.items,
+                emptyText = activeDashboardGroup.emptyText,
+                onOpenReport = { item ->
+                    if (!user.isSupervisor && item.stage() == "levantamento_pendente") onOpenSurvey(item)
+                    else onOpenReport(item)
+                }
+            )
+            Spacer(Modifier.height(18.dp))
             MonthlyDeliveriesChart(history)
             Spacer(Modifier.height(14.dp))
             StatusDistributionChart(history)
@@ -616,26 +866,190 @@ private fun DashboardScreen(
                     }
                 }
             }
-            Spacer(Modifier.height(24.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(Modifier.size(34.dp).clip(RoundedCornerShape(11.dp)).background(Color(0xFFE8EDFF)), contentAlignment = Alignment.Center) {
-                    Icon(Icons.Outlined.BusinessCenter, null, Modifier.size(19.dp), tint = Navy)
+            Spacer(Modifier.height(12.dp))
+        }
+    }
+}
+
+@Composable
+private fun HistorySection(
+    title: String,
+    items: List<ImplementationSummary>,
+    emptyText: String,
+    total: Int = items.size,
+    onOpenReport: (ImplementationSummary) -> Unit
+) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Box(Modifier.size(34.dp).clip(RoundedCornerShape(11.dp)).background(Color(0xFFE8EDFF)), contentAlignment = Alignment.Center) {
+            Icon(Icons.Outlined.BusinessCenter, null, Modifier.size(19.dp), tint = Navy)
+        }
+        Spacer(Modifier.width(10.dp))
+        Text(title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = Color(0xFF1B2437))
+        Spacer(Modifier.weight(1f))
+        Text("$total total", style = MaterialTheme.typography.labelMedium, color = Color(0xFF778095))
+    }
+    Spacer(Modifier.height(12.dp))
+    if (items.isEmpty()) {
+        EmptyHistoryCard(emptyText)
+    } else {
+        items.forEach { item ->
+            HistoryCard(item) { onOpenReport(item) }
+            Spacer(Modifier.height(10.dp))
+        }
+    }
+}
+
+@Composable
+private fun NewClientDialog(initialFields: Map<String, String> = emptyMap(), onDismiss: () -> Unit, onSave: (Map<String, String>) -> Unit) {
+    var cliente by rememberSaveable(initialFields["_id"]) { mutableStateOf(initialFields["cliente"].orEmpty()) }
+    var contato by rememberSaveable(initialFields["_id"]) { mutableStateOf(initialFields["contato"].orEmpty()) }
+    var telefone by rememberSaveable(initialFields["_id"]) { mutableStateOf(initialFields["telefone"].orEmpty()) }
+    var email by rememberSaveable(initialFields["_id"]) { mutableStateOf(initialFields["email"].orEmpty()) }
+    var cnpj by rememberSaveable(initialFields["_id"]) { mutableStateOf(initialFields["cnpj"].orEmpty()) }
+    var inscricao by rememberSaveable(initialFields["_id"]) { mutableStateOf(initialFields["inscricaoEstadual"].orEmpty()) }
+    var implantador by rememberSaveable(initialFields["_id"]) { mutableStateOf(initialFields["_assignedImplantadorUsername"].orEmpty()) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(if (initialFields.isEmpty()) "Cadastrar cliente" else "Editar cliente") },
+        text = {
+            Column {
+                OutlinedTextField(cliente, { cliente = it }, label = { Text("Cliente / Projeto") }, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(implantador, { implantador = it }, label = { Text("Usuário do implantador responsável") }, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(contato, { contato = it }, label = { Text("Contato") }, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(telefone, { telefone = it }, label = { Text("Tel/Cel") }, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(email, { email = it }, label = { Text("E-mail") }, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(cnpj, { cnpj = it }, label = { Text("CNPJ") }, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(inscricao, { inscricao = it }, label = { Text("Inscrição Estadual") }, modifier = Modifier.fillMaxWidth())
+            }
+        },
+        confirmButton = {
+            Button(onClick = {
+                if (cliente.isNotBlank() && implantador.isNotBlank()) onSave(
+                    mapOf(
+                        "cliente" to cliente,
+                        "empresa" to cliente,
+                        "_assignedImplantadorUsername" to implantador.trim().lowercase(Locale.ROOT),
+                        "_assignedImplantadorName" to implantador.trim(),
+                        "contato" to contato,
+                        "telefone" to telefone,
+                        "email" to email,
+                        "cnpj" to cnpj,
+                        "inscricaoEstadual" to inscricao
+                    )
+                )
+            }) { Text("Salvar") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancelar") } },
+        shape = RoundedCornerShape(24.dp)
+    )
+}
+
+@Composable
+private fun SurveyScreen(
+    data: ReportData,
+    vm: ReportViewModel,
+    onBack: () -> Unit,
+    onSave: () -> Unit,
+    onComplete: () -> Unit
+) {
+    var surveyStep by rememberSaveable(data.field("_id")) { mutableIntStateOf(0) }
+    val currentIndex = surveyStep.coerceIn(0, surveySections.lastIndex)
+    val currentSection = surveySections[currentIndex]
+    val progress = (currentIndex + 1f) / surveySections.size
+    Scaffold(
+        containerColor = PageBackground,
+        topBar = {
+            Surface(modifier = Modifier.statusBarsPadding(), color = Color.White, shadowElevation = 1.dp) {
+                Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "Voltar") }
+                    Column(Modifier.weight(1f)) {
+                        Text("Levantamento", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = Navy)
+                        Text(data.field("cliente").ifBlank { data.field("empresa").ifBlank { "Cliente não informado" } }, style = MaterialTheme.typography.bodySmall, color = Color(0xFF778095))
+                    }
                 }
-                Spacer(Modifier.width(10.dp))
-                Text("Implantações recentes", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = Color(0xFF1B2437))
-                Spacer(Modifier.weight(1f))
-                Text("${history.size} total", style = MaterialTheme.typography.labelMedium, color = Color(0xFF778095))
+            }
+        },
+        bottomBar = {
+            Surface(modifier = Modifier.navigationBarsPadding(), color = Color.White, shadowElevation = 12.dp) {
+                Row(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 12.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    if (currentIndex > 0) {
+                        OutlinedButton(
+                            onClick = { surveyStep = (surveyStep - 1).coerceAtLeast(0) },
+                            modifier = Modifier.height(52.dp),
+                            shape = RoundedCornerShape(16.dp)
+                        ) {
+                            Icon(Icons.AutoMirrored.Rounded.ArrowBack, null, Modifier.size(20.dp))
+                            Spacer(Modifier.width(7.dp))
+                            Text("Anterior")
+                        }
+                    }
+                    OutlinedButton(onClick = onSave, modifier = Modifier.weight(1f).height(52.dp), shape = RoundedCornerShape(16.dp)) {
+                        Icon(Icons.Outlined.Save, null, Modifier.size(20.dp))
+                        Spacer(Modifier.width(7.dp))
+                        Text("Salvar")
+                    }
+                    if (currentIndex < surveySections.lastIndex) {
+                        Button(
+                            onClick = { surveyStep = (surveyStep + 1).coerceAtMost(surveySections.lastIndex) },
+                            modifier = Modifier.weight(1f).height(52.dp),
+                            shape = RoundedCornerShape(16.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = Navy)
+                        ) {
+                            Text("Próximo")
+                            Spacer(Modifier.width(7.dp))
+                            Icon(Icons.AutoMirrored.Rounded.ArrowForward, null, Modifier.size(20.dp))
+                        }
+                    } else {
+                        Button(onClick = onComplete, modifier = Modifier.weight(1f).height(52.dp), shape = RoundedCornerShape(16.dp), colors = ButtonDefaults.buttonColors(containerColor = Green)) {
+                            Icon(Icons.Rounded.CheckCircle, null, Modifier.size(20.dp))
+                            Spacer(Modifier.width(7.dp))
+                            Text("Concluir")
+                        }
+                    }
+                }
+            }
+        }
+    ) { padding ->
+        Column(Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState()).padding(horizontal = 18.dp, vertical = 18.dp)) {
+            Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(22.dp)).background(Brush.linearGradient(listOf(NavyDark, Navy))).padding(20.dp)) {
+                Text("LEVANTAMENTO DE DADOS", color = Color(0xFFBFC9F5), style = MaterialTheme.typography.labelMedium)
+                Spacer(Modifier.height(5.dp))
+                Text(data.field("cliente").ifBlank { data.field("empresa").ifBlank { "Novo levantamento" } }, color = Color.White, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+                Text("Preencha as informações levantadas junto ao cliente final.", color = Color(0xFFD9DFF6), style = MaterialTheme.typography.bodyMedium)
+            }
+            Spacer(Modifier.height(16.dp))
+            Row(
+                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                surveySections.forEachIndexed { index, section ->
+                    val active = index == currentIndex
+                    Button(
+                        onClick = { surveyStep = index },
+                        shape = RoundedCornerShape(16.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (active) Navy else Color.White,
+                            contentColor = if (active) Color.White else Navy
+                        ),
+                        elevation = ButtonDefaults.buttonElevation(defaultElevation = 0.dp)
+                    ) {
+                        Text(surveyTabTitle(section.title), fontWeight = FontWeight.Bold)
+                    }
+                }
             }
             Spacer(Modifier.height(12.dp))
-            if (history.isEmpty()) {
-                EmptyHistoryCard()
-            } else {
-                history.take(5).forEach { item ->
-                    HistoryCard(item) { onOpenReport(item) }
-                    Spacer(Modifier.height(10.dp))
+            SectionCard(
+                currentSection.title,
+                "Etapa ${currentIndex + 1} de ${surveySections.size} • ${((progress * 100).toInt())}% do levantamento"
+            ) {
+                Column(Modifier.padding(horizontal = 9.dp, vertical = 7.dp)) {
+                    currentSection.fields
+                        .sortedBy { if (it.type == SurveyFieldType.Choice) 0 else 1 }
+                        .forEach { field ->
+                            SurveyField(field, data, vm)
+                        }
                 }
             }
-            Spacer(Modifier.height(12.dp))
         }
     }
 }
@@ -654,7 +1068,7 @@ private fun DashboardHeader(user: AuthUser, onLogout: () -> Unit) {
             Image(
                 painter = painterResource(R.drawable.logo_dubrasil),
                 contentDescription = "DuBrasil Soluções",
-                modifier = Modifier.width(58.dp).height(45.dp),
+                modifier = Modifier.size(46.dp),
                 contentScale = ContentScale.Fit
             )
             Spacer(Modifier.weight(1f))
@@ -688,6 +1102,41 @@ private fun MetricCard(
             Column {
                 Text(value, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.ExtraBold, color = Color(0xFF1B2437))
                 Text(label, style = MaterialTheme.typography.bodySmall, color = Color(0xFF778095))
+            }
+        }
+    }
+}
+
+@Composable
+private fun WorkflowSummaryCard(
+    modifier: Modifier,
+    group: DashboardGroup,
+    active: Boolean,
+    onClick: () -> Unit
+) {
+    val borderColor = if (active) Navy else Border
+    Surface(
+        modifier = modifier.height(150.dp).clickable(onClick = onClick),
+        color = Color.White,
+        shape = RoundedCornerShape(20.dp),
+        border = androidx.compose.foundation.BorderStroke(if (active) 2.dp else 1.dp, borderColor)
+    ) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.SpaceBetween) {
+            Box(
+                Modifier.size(40.dp).clip(CircleShape).background(if (active) Navy else Color(0xFFF0F3FB)),
+                contentAlignment = Alignment.Center
+            ) {
+                when (group.icon) {
+                    "timer" -> Icon(Icons.Outlined.Timer, null, tint = if (active) Color.White else Navy)
+                    "calendar" -> Icon(Icons.Outlined.CalendarMonth, null, tint = if (active) Color.White else Navy)
+                    "briefcase" -> Icon(Icons.Outlined.BusinessCenter, null, tint = if (active) Color.White else Navy)
+                    else -> Icon(Icons.Outlined.Description, null, tint = if (active) Color.White else Navy)
+                }
+            }
+            Column {
+                Text(group.title, style = MaterialTheme.typography.bodySmall, color = Color(0xFF778095), maxLines = 2)
+                Text(group.value.toString(), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.ExtraBold, color = Color(0xFF1B2437))
+                Text(group.subtitle, style = MaterialTheme.typography.labelSmall, color = Color(0xFF778095), maxLines = 2)
             }
         }
     }
@@ -816,6 +1265,43 @@ private fun hasSupervisorEvaluation(data: ReportData): Boolean =
         data.field("_supervisionScore").isNotBlank() ||
         data.checks.any { it in ReportSchema.supervisionChecklistItems() }
 
+private fun ImplementationSummary.isReadyForSupervisorEvaluation(): Boolean =
+    deliveryStatus.trim().startsWith("Conclu", ignoreCase = true)
+
+private fun ImplementationSummary.stage(): String =
+    report.field("_stage").ifBlank { "rei" }
+
+private fun ImplementationSummary.isSurveyStage(): Boolean =
+    stage() in setOf("levantamento_pendente", "rei_pendente")
+
+private fun ImplementationSummary.isAssignedTo(username: String): Boolean {
+    val assigned = report.field("_assignedImplantadorUsername").trim()
+    return assigned.isBlank() || assigned.equals(username.trim(), ignoreCase = true)
+}
+
+private fun ImplementationSummary.implementationDurationDays(): Double? {
+    val start = report.field("inicio").toReportDate() ?: return null
+    val end = report.field("termino").toReportDate() ?: return null
+    if (end.isBefore(start)) return null
+    return (ChronoUnit.DAYS.between(start, end) + 1).toDouble()
+}
+
+private fun String.toReportDate(): LocalDate? {
+    val value = trim()
+    if (value.isBlank()) return null
+    val datePart = value.take(10)
+    return runCatching {
+        when {
+            Regex("\\d{4}-\\d{2}-\\d{2}").matches(datePart) -> LocalDate.parse(datePart)
+            Regex("\\d{2}/\\d{2}/\\d{4}").matches(datePart) -> LocalDate.parse(datePart, DateTimeFormatter.ofPattern("dd/MM/yyyy"))
+            else -> null
+        }
+    }.getOrNull()
+}
+
+private fun ReportData.isConcludedDelivery(): Boolean =
+    deliveryStatus.trim().startsWith("Conclu", ignoreCase = true)
+
 private fun supervisionScore(data: ReportData): Double? {
     data.field("_supervisionScore").replace(",", ".").toDoubleOrNull()
         ?.coerceIn(0.0, 10.0)
@@ -891,7 +1377,7 @@ private fun EvaluationRow(item: ImplementationSummary, onClick: () -> Unit) {
 }
 
 @Composable
-private fun EmptyHistoryCard() {
+private fun EmptyHistoryCard(message: String = "Nenhuma implantação registrada") {
     Surface(
         Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(20.dp),
@@ -903,7 +1389,7 @@ private fun EmptyHistoryCard() {
                 Icon(Icons.Outlined.BusinessCenter, null, tint = Navy)
             }
             Spacer(Modifier.height(12.dp))
-            Text("Nenhuma implantação registrada", fontWeight = FontWeight.Bold)
+            Text(message, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(4.dp))
             Text("Gere o primeiro relatório para alimentar suas métricas.", style = MaterialTheme.typography.bodySmall, color = Color(0xFF778095))
         }
@@ -928,6 +1414,9 @@ private fun HistoryCard(item: ImplementationSummary, onClick: () -> Unit) {
                 Text(item.client, fontWeight = FontWeight.Bold, color = Color(0xFF252D40), maxLines = 1)
                 Text(date, style = MaterialTheme.typography.bodySmall, color = Color(0xFF778095))
                 if (item.consultant.isNotBlank()) Text(item.consultant, style = MaterialTheme.typography.bodySmall, color = Color(0xFF778095), maxLines = 1)
+                item.report.field("_assignedImplantadorName").ifBlank { item.report.field("_assignedImplantadorUsername") }.takeIf { it.isNotBlank() }?.let {
+                    Text("Responsável: $it", style = MaterialTheme.typography.bodySmall, color = Color(0xFF778095), maxLines = 1)
+                }
             }
             Surface(color = Color(0xFFEBF5E8), shape = RoundedCornerShape(50)) {
                 Text("${item.checkedItems} itens", Modifier.padding(horizontal = 9.dp, vertical = 5.dp), style = MaterialTheme.typography.labelMedium, color = Color(0xFF3E7034))
@@ -1309,7 +1798,7 @@ private fun ReiTopBar(onHome: (() -> Unit)?, onNewReport: () -> Unit, onLogout: 
             Image(
                 painter = painterResource(R.drawable.logo_dubrasil),
                 contentDescription = "DuBrasil Soluções",
-                modifier = Modifier.width(58.dp).height(45.dp),
+                modifier = Modifier.size(46.dp),
                 contentScale = ContentScale.Fit
             )
             Spacer(Modifier.weight(1f))
@@ -1415,7 +1904,14 @@ private fun StepSelector(selected: Int, onSelect: (Int) -> Unit) {
 }
 
 @Composable
-private fun BottomActions(currentStep: Int, onBack: () -> Unit, onNext: () -> Unit, onExport: () -> Unit) {
+private fun BottomActions(
+    currentStep: Int,
+    canExport: Boolean,
+    onBack: () -> Unit,
+    onNext: () -> Unit,
+    onSaveOnly: () -> Unit,
+    onExport: () -> Unit
+) {
     Surface(
         modifier = Modifier.navigationBarsPadding(),
         color = Color.White,
@@ -1434,18 +1930,42 @@ private fun BottomActions(currentStep: Int, onBack: () -> Unit, onNext: () -> Un
             ) {
                 Icon(Icons.AutoMirrored.Rounded.ArrowBack, null)
                 Spacer(Modifier.width(6.dp))
-                Text("Voltar")
+                Text("Anterior")
             }
-            Button(
-                onClick = if (currentStep < steps.lastIndex) onNext else onExport,
-                modifier = Modifier.weight(1f).height(52.dp),
-                shape = RoundedCornerShape(16.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = Navy)
-            ) {
-                if (currentStep == steps.lastIndex) Icon(Icons.Outlined.PictureAsPdf, null, Modifier.size(20.dp))
-                Text(if (currentStep < steps.lastIndex) "Continuar" else "Gerar relatório PDF")
-                Spacer(Modifier.width(7.dp))
-                if (currentStep < steps.lastIndex) Icon(Icons.AutoMirrored.Rounded.ArrowForward, null, Modifier.size(20.dp))
+            if (currentStep < steps.lastIndex) {
+                Button(
+                    onClick = onNext,
+                    modifier = Modifier.weight(1f).height(52.dp),
+                    shape = RoundedCornerShape(16.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = Navy)
+                ) {
+                    Text("Continuar")
+                    Spacer(Modifier.width(7.dp))
+                    Icon(Icons.AutoMirrored.Rounded.ArrowForward, null, Modifier.size(20.dp))
+                }
+            } else {
+                OutlinedButton(
+                    onClick = onSaveOnly,
+                    modifier = Modifier.weight(1f).height(52.dp),
+                    shape = RoundedCornerShape(16.dp),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, Navy)
+                ) {
+                    Icon(Icons.Outlined.Save, null, Modifier.size(20.dp))
+                    Spacer(Modifier.width(7.dp))
+                    Text("Salvar apenas")
+                }
+                if (canExport) {
+                    Button(
+                        onClick = onExport,
+                        modifier = Modifier.weight(1f).height(52.dp),
+                        shape = RoundedCornerShape(16.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = Navy)
+                    ) {
+                        Icon(Icons.Outlined.PictureAsPdf, null, Modifier.size(20.dp))
+                        Spacer(Modifier.width(7.dp))
+                        Text("Gerar PDF")
+                    }
+                }
             }
         }
     }
@@ -1730,6 +2250,42 @@ private fun RadioOptions(options: List<String>, selected: String, onSelect: (Str
 }
 
 @Composable
+private fun SurveyField(field: SurveyFieldDef, data: ReportData, vm: ReportViewModel) {
+    when (field.type) {
+        SurveyFieldType.Choice -> ChoiceField(field, data, vm)
+        SurveyFieldType.TextArea -> FormField(field.label, field.key, data, vm, minLines = field.minLines)
+        SurveyFieldType.Text -> FormField(field.label, field.key, data, vm)
+    }
+}
+
+@Composable
+private fun ChoiceField(field: SurveyFieldDef, data: ReportData, vm: ReportViewModel) {
+    Column(Modifier.fillMaxWidth().padding(bottom = 12.dp)) {
+        Text(field.label, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, color = Color(0xFF596174))
+        Spacer(Modifier.height(7.dp))
+        Row(
+            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            field.options.forEach { option ->
+                val selected = data.field(field.key) == option
+                Surface(
+                    modifier = Modifier.clickable { vm.setField(field.key, option) },
+                    shape = RoundedCornerShape(50),
+                    color = if (selected) Color(0xFFEBF5E8) else Color.White,
+                    border = androidx.compose.foundation.BorderStroke(1.dp, if (selected) Green else Color(0xFFD7DBE5))
+                ) {
+                    Row(Modifier.padding(end = 12.dp).height(42.dp), verticalAlignment = Alignment.CenterVertically) {
+                        RadioButton(selected = selected, onClick = { vm.setField(field.key, option) })
+                        Text(option, style = MaterialTheme.typography.labelLarge, color = if (selected) Color(0xFF3E7034) else Navy, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun FormField(label: String, key: String, data: ReportData, vm: ReportViewModel, minLines: Int = 1) {
     OutlinedTextField(
         value = data.field(key),
@@ -1940,6 +2496,16 @@ private fun attachmentFromUri(context: Context, uri: Uri): ReportAttachment {
 
 private fun dateStamp(): String =
     SimpleDateFormat("dd-MM-yyyy HH-mm-ss", Locale("pt", "BR")).format(Date())
+
+private fun reportPdfFileName(clientName: String): String {
+    val safeClient = clientName
+        .replace(Regex("[\\\\/:*?\"<>|\\r\\n]+"), " ")
+        .replace(Regex("\\s+"), " ")
+        .trim()
+        .trim('.')
+        .ifBlank { "Cliente" }
+    return "Relatorio de Entrega - $safeClient.pdf"
+}
 
 private fun saveSignature(
     context: Context,

@@ -338,7 +338,7 @@ object PdfExporter {
 
         private fun drawPageHeader() {
             val canvas = page.canvas
-            canvas.drawBitmap(logo, null, RectF(left, 18f, left + 62f, 70f), body)
+            canvas.drawBitmap(logo, null, RectF(left, 18f, left + 54f, 54f), body)
             val title = "RELATÓRIO DE ENTREGA DE IMPLANTAÇÃO"
             val titlePaint = paint(12.5f, navyDark, true)
             canvas.drawText(title, right - titlePaint.measureText(title), 39f, titlePaint)
