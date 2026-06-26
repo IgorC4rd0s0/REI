@@ -176,7 +176,7 @@ function renderLogin(error = "") {
     <section class="card">
             <div class=\"brand login-brand\"><img src=\"/web/assets/logo_dbs_app.png\" alt=\"DuBrasil Soluções\"></div>
       <h1>Acesso web</h1>
-      <p class="muted">Entre com o usuário cadastrado no gerenciador do escritório.</p>
+      <p class="muted">Entre com o usuário e senha para acessar o sistema.</p>
       ${error ? `<div class="error">${esc(error)}</div>` : ""}
       <form id="loginForm">
         <div class="field"><label>Usuário</label><input name="username" autocomplete="username" required></div>
