@@ -18,6 +18,7 @@ class ReportRepository(context: Context) {
     private val legacyPrefs = appContext.getSharedPreferences("rei_report", Context.MODE_PRIVATE)
 
     init {
+        SchemaStore(appContext).applyCached()
         migrateLegacyStorage()
         SyncScheduler.enqueue(appContext)
     }
@@ -75,6 +76,7 @@ class ReportRepository(context: Context) {
     fun syncNow() {
         val client = CentralSyncClient(appContext)
         var failed = false
+        client.fetchSchemaOverrides()
         dao.getPendingSync().forEach { entity ->
             val attempt = System.currentTimeMillis()
             client.send(entity)

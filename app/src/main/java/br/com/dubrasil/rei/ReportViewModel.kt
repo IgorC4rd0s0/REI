@@ -7,6 +7,8 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import br.com.dubrasil.rei.data.ReportRepository
+import br.com.dubrasil.rei.data.ReiReminderScheduler
+import br.com.dubrasil.rei.data.SchemaStore
 import br.com.dubrasil.rei.model.ReportData
 import br.com.dubrasil.rei.model.ReportAttachment
 import br.com.dubrasil.rei.model.ImplementationSummary
@@ -22,6 +24,12 @@ class ReportViewModel(application: Application) : AndroidViewModel(application) 
         private set
     var history by mutableStateOf(repository.loadHistory())
         private set
+    var schemaVersion by mutableStateOf(0)
+        private set
+
+    init {
+        SchemaStore(application).applyCached()
+    }
 
     fun setField(key: String, value: String) = update(report.copy(fields = report.fields + (key to value)))
 
@@ -53,6 +61,37 @@ class ReportViewModel(application: Application) : AndroidViewModel(application) 
         })
         repository.clear()
         repository.save(report)
+    }
+
+    fun startNewSurvey(ownerUsername: String = "", ownerName: String = ""): String {
+        val id = UUID.randomUUID().toString()
+        val data = ReportData(fields = buildMap {
+            put("_id", id)
+            put("_stage", "levantamento_pendente")
+            if (ownerUsername.isNotBlank()) {
+                put("_ownerUsername", ownerUsername)
+                put("_createdBy", ownerUsername)
+                put("_assignedImplantadorUsername", ownerUsername)
+            }
+            if (ownerName.isNotBlank()) {
+                put("_assignedImplantadorName", ownerName)
+                put("analistaLevantamento", ownerName)
+            }
+        })
+        val summary = ImplementationSummary(
+            id = id,
+            client = "Cliente não informado",
+            consultant = data.field("consultor"),
+            completedAt = System.currentTimeMillis(),
+            deliveryStatus = data.deliveryStatus,
+            checkedItems = 0,
+            report = data
+        )
+        history = (history + summary).sortedByDescending { it.completedAt }
+        repository.saveHistory(history)
+        report = data
+        repository.save(report)
+        return id
     }
 
     fun editCompletedReport(id: String, ownerUsername: String = "") {
@@ -140,6 +179,14 @@ class ReportViewModel(application: Application) : AndroidViewModel(application) 
         repository.saveHistory(history)
         report = data
         repository.save(report)
+        if (stage == "levantamento_pendente") {
+            ReiReminderScheduler.scheduleSurveyReminder(
+                getApplication(),
+                id,
+                data.field("cliente").ifBlank { data.field("empresa") },
+                data.field("_surveyScheduledAt")
+            )
+        }
     }
 
     fun saveSupervisorEvaluation(id: String, supervisorName: String, score: String, rating: String, supervisionChecks: Set<String>) {
@@ -189,6 +236,8 @@ class ReportViewModel(application: Application) : AndroidViewModel(application) 
                 repository.loadHistory()
             }
             history = latest
+            SchemaStore(getApplication()).applyCached()
+            schemaVersion++
         }
     }
 

@@ -14,6 +14,7 @@ import br.com.dubrasil.rei.model.ChecklistGroup
 import br.com.dubrasil.rei.model.ReportData
 import br.com.dubrasil.rei.model.ReportSchema
 import java.io.OutputStream
+import java.util.Locale
 import kotlin.math.min
 
 object PdfExporter {
@@ -29,6 +30,14 @@ object PdfExporter {
     fun write(context: Context, output: OutputStream, data: ReportData) {
         val document = PdfDocument()
         val writer = FormWriter(document, context, data)
+
+        if (isSurveyReport(data)) {
+            writeSurvey(writer, data)
+            writer.finish()
+            document.writeTo(output)
+            document.close()
+            return
+        }
 
         writer.section("MÓDULOS CONTRATADOS")
         writer.checklist(ReportSchema.contractedModules, columns = 3) { ReportSchema.contractedKey(it) }
@@ -96,6 +105,115 @@ object PdfExporter {
         writer.finish()
         document.writeTo(output)
         document.close()
+    }
+
+    private fun isSurveyReport(data: ReportData): Boolean =
+        data.field("_stage") in setOf("levantamento_pendente", "rei_pendente")
+
+    private fun writeSurvey(writer: FormWriter, data: ReportData) {
+        writer.section("IDENTIFICAÇÃO DO CLIENTE")
+        writer.infoTable(listOf(
+            "Cliente / Projeto" to data.field("cliente").ifBlank { data.field("empresa") },
+            "Contato" to data.field("contato"),
+            "Tel/Cel" to data.field("telefone"),
+            "E-mail" to data.field("email"),
+            "CNPJ" to data.field("cnpj"),
+            "Inscrição Estadual" to data.field("inscricaoEstadual"),
+            "Data e hora do levantamento" to data.field("_surveyScheduledAt"),
+            "Implantador responsável" to data.field("_assignedImplantadorName").ifBlank { data.field("analistaLevantamento") }
+        ))
+        writer.paragraphBox("Presentes na reunião", data.field("presentesReuniao"), 48f)
+
+        activeSurveyPrintSections().forEach { section ->
+            writer.section(section.title)
+            val choices = section.fields.filter { it.type == "choice" }
+            val texts = section.fields.filterNot { it.type == "choice" }
+            if (choices.isNotEmpty()) writer.infoTable(choices.map { it.label to data.field(it.key) })
+            texts.forEach { field ->
+                writer.paragraphBox(field.label, data.field(field.key), if (field.type == "textarea") 58f else 38f)
+            }
+        }
+    }
+
+    private data class SurveyPrintField(val key: String, val label: String, val type: String = "text")
+    private data class SurveyPrintSection(val title: String, val fields: List<SurveyPrintField>)
+
+    private val surveyPrintSections = listOf(
+        SurveyPrintSection("FINANCEIRO", listOf(
+            SurveyPrintField("financeiroCentroCusto", "Centro de custo", "choice"),
+            SurveyPrintField("financeiroContasPagarReceber", "Gerencia Contas a pagar/receber?", "choice"),
+            SurveyPrintField("financeiroFluxoCaixa", "Utiliza Fluxo de caixa?", "choice"),
+            SurveyPrintField("financeiroConciliacao", "Utiliza Conciliação bancária?", "choice"),
+            SurveyPrintField("financeiroCartao", "Utiliza Controle de cartão?", "choice"),
+            SurveyPrintField("financeiroCheque", "Utiliza Controle de cheque?", "choice"),
+            SurveyPrintField("financeiroDescontoTitulo", "Utiliza Desconto de Título?", "choice"),
+            SurveyPrintField("financeiroPrevisaoFutura", "Utiliza Previsão futura de Contas a Pagar?", "choice"),
+            SurveyPrintField("financeiroCartaoMaquina", "Qual máquina utilizada?"),
+            SurveyPrintField("financeiroFormasPagamento", "Formas de pagamento", "textarea"),
+            SurveyPrintField("financeiroParticularidades", "Particularidades perfil financeiro", "textarea")
+        )),
+        SurveyPrintSection("ESTOQUE", listOf(
+            SurveyPrintField("estoquePdv", "Utiliza PDV?", "choice"),
+            SurveyPrintField("estoqueDevolucao", "Utiliza devolução de compra e venda?", "choice"),
+            SurveyPrintField("estoqueComissao", "Utiliza comissão?", "choice"),
+            SurveyPrintField("estoqueComissaoPagamento", "Se SIM, pagamento sobre?", "choice"),
+            SurveyPrintField("estoqueOrdemServico", "Utiliza Ordem de serviço?", "choice"),
+            SurveyPrintField("estoqueControlaEstoque", "Controla Estoque?", "choice"),
+            SurveyPrintField("estoqueFormacaoPreco", "Utiliza formação de preço?", "choice"),
+            SurveyPrintField("estoqueCertificado", "Utiliza qual certificado?", "choice"),
+            SurveyPrintField("estoqueBalanca", "Utiliza balança?", "choice"),
+            SurveyPrintField("estoqueLote", "Utiliza controle de lote?", "choice"),
+            SurveyPrintField("estoqueComposicao", "Utiliza composição?", "choice"),
+            SurveyPrintField("estoqueSimilar", "Utiliza similar?", "choice"),
+            SurveyPrintField("estoqueSerieProduto", "Utiliza controle de série cadastro produto?", "choice"),
+            SurveyPrintField("estoqueSerieNf", "Série da Nota Fiscal"),
+            SurveyPrintField("estoqueEmailNf", "Qual e-mail para envio NF?"),
+            SurveyPrintField("estoqueTiposNotas", "Quais tipos de notas emitidas sem ser venda", "textarea"),
+            SurveyPrintField("estoqueParticularidades", "Particularidades perfil estoque", "textarea"),
+            SurveyPrintField("estoqueDetalhes", "Detalhes", "textarea")
+        )),
+        SurveyPrintSection("GERAIS", listOf(
+            SurveyPrintField("geralAgendamento", "A implantação pode ser agendada em qualquer período?", "choice"),
+            SurveyPrintField("geralRelatorios", "Relatórios utilizados ao longo do mês", "textarea"),
+            SurveyPrintField("geralWorkflow", "Workflow", "textarea"),
+            SurveyPrintField("geralCustomizacao", "Customização", "textarea")
+        )),
+        SurveyPrintSection("MOVIMENTOS E ANOTAÇÕES", listOf(
+            SurveyPrintField("movimentosEntrada", "Movimentos de entrada", "textarea"),
+            SurveyPrintField("movimentosSaida", "Movimentos de saída", "textarea"),
+            SurveyPrintField("anotacoes", "Anotações", "textarea"),
+            SurveyPrintField("fluxogramaInicial", "Fluxograma inicial", "textarea")
+        ))
+    )
+
+    private fun activeSurveyPrintSections(): List<SurveyPrintSection> {
+        val result = surveyPrintSections.map { section ->
+            section.copy(fields = section.fields.toMutableList())
+        }.toMutableList()
+        ReportSchema.surveySections.forEach { custom ->
+            val title = custom.title.uppercase(Locale("pt", "BR"))
+            val fields = custom.fields.map { field ->
+                SurveyPrintField(
+                    key = field.key,
+                    label = field.label,
+                    type = when (field.type.lowercase(Locale.ROOT)) {
+                        "choice" -> "choice"
+                        "textarea" -> "textarea"
+                        else -> "text"
+                    }
+                )
+            }
+            val index = result.indexOfFirst { it.title.equals(title, ignoreCase = true) || it.title.equals(custom.title, ignoreCase = true) }
+            if (index >= 0) {
+                val current = result[index]
+                result[index] = current.copy(fields = current.fields + fields.filterNot { customField ->
+                    current.fields.any { it.key == customField.key }
+                })
+            } else if (fields.isNotEmpty()) {
+                result.add(SurveyPrintSection(title, fields))
+            }
+        }
+        return result
     }
 
     private class FormWriter(
@@ -339,10 +457,10 @@ object PdfExporter {
         private fun drawPageHeader() {
             val canvas = page.canvas
             canvas.drawBitmap(logo, null, RectF(left, 18f, left + 54f, 54f), body)
-            val title = "RELATÓRIO DE ENTREGA DE IMPLANTAÇÃO"
+            val title = if (isSurveyReport(data)) "LEVANTAMENTO DE DADOS" else "RELATÓRIO DE ENTREGA DE IMPLANTAÇÃO"
             val titlePaint = paint(12.5f, navyDark, true)
             canvas.drawText(title, right - titlePaint.measureText(title), 39f, titlePaint)
-            val subtitle = "Sistema de Gestão TGA • R.E.I."
+            val subtitle = if (isSurveyReport(data)) "Sistema de Gestão TGA • Pré-implantação" else "Sistema de Gestão TGA • R.E.I."
             canvas.drawText(subtitle, right - small.measureText(subtitle), 54f, small)
             canvas.drawRect(left, 72f, right, 75f, Paint().apply { color = navy })
             canvas.drawRect(left, 75f, left + 118f, 78f, Paint().apply { color = green })

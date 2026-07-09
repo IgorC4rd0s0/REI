@@ -151,4 +151,30 @@ class CentralSyncClient(private val context: Context) {
             connection.disconnect()
         }
     }
+
+    fun fetchSchemaOverrides(): Result<Unit> = runCatching {
+        val baseUrl = AuthStore.normalizeServerUrl(auth.serverUrl())
+        require(baseUrl.isNotBlank()) { "Servidor central nÃ£o configurado" }
+        require(auth.token().isNotBlank()) { "UsuÃ¡rio nÃ£o autenticado" }
+
+        val connection = (URL("$baseUrl/api/schema-overrides").openConnection() as HttpURLConnection).apply {
+            requestMethod = "GET"
+            connectTimeout = 6_000
+            readTimeout = 10_000
+            setRequestProperty("Accept", "application/json")
+            setRequestProperty("Authorization", "Bearer ${auth.token()}")
+        }
+        try {
+            val responseCode = connection.responseCode
+            val body = (if (responseCode in 200..299) connection.inputStream else connection.errorStream)
+                ?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
+            if (responseCode !in 200..299) {
+                val message = runCatching { JSONObject(body).optString("error") }.getOrDefault("")
+                error(message.ifBlank { "Servidor respondeu HTTP $responseCode" })
+            }
+            SchemaStore(context).save(body)
+        } finally {
+            connection.disconnect()
+        }
+    }
 }

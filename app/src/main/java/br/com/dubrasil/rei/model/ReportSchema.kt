@@ -1,16 +1,103 @@
 package br.com.dubrasil.rei.model
 
+import org.json.JSONArray
+import org.json.JSONObject
+
 data class ChecklistGroup(val title: String, val items: List<String>)
+data class SurveyFieldSchema(
+    val key: String,
+    val label: String,
+    val type: String = "text",
+    val options: List<String> = emptyList(),
+    val minLines: Int = 1
+)
+data class SurveySectionSchema(val title: String, val fields: List<SurveyFieldSchema>)
+
+data class SchemaOverrides(
+    val contractedModules: List<String> = emptyList(),
+    val technical: List<ChecklistGroup> = emptyList(),
+    val stock: List<ChecklistGroup> = emptyList(),
+    val finance: List<ChecklistGroup> = emptyList(),
+    val fiscalReports: List<ChecklistGroup> = emptyList(),
+    val supervision: List<ChecklistGroup> = emptyList(),
+    val surveySections: List<SurveySectionSchema> = emptyList()
+) {
+    companion object {
+        val Empty = SchemaOverrides()
+
+        fun fromJson(root: JSONObject): SchemaOverrides {
+            val rei = root.optJSONObject("rei") ?: JSONObject()
+            return SchemaOverrides(
+                contractedModules = rei.optStringList("modules"),
+                technical = rei.optGroups("technical"),
+                stock = rei.optGroups("stock"),
+                finance = rei.optGroups("finance"),
+                fiscalReports = rei.optGroups("fiscal"),
+                supervision = rei.optGroups("supervision"),
+                surveySections = root.optSurveySections("levantamento")
+            )
+        }
+
+        private fun JSONObject.optStringList(key: String): List<String> {
+            val array = optJSONArray(key) ?: return emptyList()
+            return (0 until array.length()).mapNotNull { index ->
+                array.optString(index).trim().takeIf { it.isNotBlank() }
+            }
+        }
+
+        private fun JSONObject.optGroups(key: String): List<ChecklistGroup> {
+            val array = optJSONArray(key) ?: return emptyList()
+            return (0 until array.length()).mapNotNull { index ->
+                val group = array.optJSONObject(index) ?: return@mapNotNull null
+                val title = group.optString("title").trim()
+                if (title.isBlank()) return@mapNotNull null
+                ChecklistGroup(title, group.optStringList("items"))
+            }
+        }
+
+        private fun JSONObject.optSurveySections(key: String): List<SurveySectionSchema> {
+            val array = optJSONArray(key) ?: return emptyList()
+            return (0 until array.length()).mapNotNull { index ->
+                val section = array.optJSONObject(index) ?: return@mapNotNull null
+                val title = section.optString("title").trim()
+                if (title.isBlank()) return@mapNotNull null
+                val fieldsArray = section.optJSONArray("fields") ?: JSONArray()
+                val fields = (0 until fieldsArray.length()).mapNotNull { fieldIndex ->
+                    val field = fieldsArray.optJSONObject(fieldIndex) ?: return@mapNotNull null
+                    val fieldKey = field.optString("key").trim()
+                    val label = field.optString("label").trim()
+                    val type = field.optString("type", "text").ifBlank { "text" }
+                    if (fieldKey.isBlank() || label.isBlank()) return@mapNotNull null
+                    SurveyFieldSchema(
+                        key = fieldKey,
+                        label = label,
+                        type = type,
+                        options = field.optStringList("options"),
+                        minLines = if (type == "textarea") 3 else 1
+                    )
+                }
+                SurveySectionSchema(title, fields)
+            }
+        }
+    }
+}
 
 object ReportSchema {
-    val contractedModules = listOf(
+    @Volatile private var overrides: SchemaOverrides = SchemaOverrides.Empty
+
+    fun configure(custom: SchemaOverrides) {
+        overrides = custom
+    }
+
+    private val baseContractedModules = listOf(
         "Manifesto", "Financeiro", "Nota Fiscal Eletrônica", "Emissão de NFC-e",
         "Compras", "Custos", "Nota Fiscal Eletrônica de Serviço", "Ordem de Serviço",
         "Estoque", "Customização", "Sintegra", "Boleto", "Faturamento",
         "SPED Fiscal / PIS-COFINS", "PDV – Ponto de Venda"
     )
+    val contractedModules: List<String> get() = mergeItems(baseContractedModules, overrides.contractedModules)
 
-    val technical = listOf(
+    private val baseTechnical = listOf(
         ChecklistGroup("Instalação e ambiente", listOf(
             "Instalação do TGA", "Conferir cadastro da empresa", "Conferir cadastro da filial",
             "Cadastro de login e senha do cliente", "Instalação do IBExpert",
@@ -32,8 +119,9 @@ object ReportSchema {
             "Configurar e explicar Liberação Online"
         ))
     )
+    val technical: List<ChecklistGroup> get() = mergeGroups(baseTechnical, overrides.technical)
 
-    val stock = listOf(
+    private val baseStock = listOf(
         ChecklistGroup("Cadastros", listOf(
             "Cadastro de cliente/fornecedor", "Cadastro de grupo", "Tributação do produto",
             "Tipo do item", "Produto ou serviço", "Ajuste de saldo"
@@ -53,8 +141,9 @@ object ReportSchema {
             "Treinamento de perfil de usuário"
         ))
     )
+    val stock: List<ChecklistGroup> get() = mergeGroups(baseStock, overrides.stock)
 
-    val finance = listOf(
+    private val baseFinance = listOf(
         ChecklistGroup("Cadastros", listOf(
             "Cadastrar conta/caixa", "Cadastrar forma de pagamento", "Cadastro de contas a pagar/receber (F7)"
         )),
@@ -70,8 +159,9 @@ object ReportSchema {
             "Remessa", "Retorno", "Cartão", "Conciliação de cartão", "Homologação de boleto", "Homologação de API"
         ))
     )
+    val finance: List<ChecklistGroup> get() = mergeGroups(baseFinance, overrides.finance)
 
-    val fiscalReports = listOf(
+    private val baseFiscalReports = listOf(
         ChecklistGroup("Módulo Fiscal", listOf(
             "Gerar Sintegra", "Envio de XML para a contabilidade", "Gerar SPED", "Relatório de entradas e saídas"
         )),
@@ -82,8 +172,9 @@ object ReportSchema {
             "Relatório de venda", "Relatório de compra", "Estoque e movimentação"
         ))
     )
+    val fiscalReports: List<ChecklistGroup> get() = mergeGroups(baseFiscalReports, overrides.fiscalReports)
 
-    val supervision = listOf(
+    private val baseSupervision = listOf(
         ChecklistGroup("Planejamento e preparação", listOf(
             "Cronograma e etapas definidos antes do início", "Requisitos e dados validados com o cliente",
             "Levantamento executado e anotado", "Ambiente de testes configurado corretamente"
@@ -106,6 +197,8 @@ object ReportSchema {
             "Busca constante por aprendizado técnico"
         ))
     )
+    val supervision: List<ChecklistGroup> get() = mergeGroups(baseSupervision, overrides.supervision)
+    val surveySections: List<SurveySectionSchema> get() = overrides.surveySections
 
     fun key(scope: String, group: String, item: String) = "$scope::$group::$item"
     fun contractedKey(item: String) = key("dados", "modulos", item)
@@ -119,4 +212,21 @@ object ReportSchema {
 
     private fun scopedKeys(scope: String, groups: List<ChecklistGroup>) =
         groups.flatMap { group -> group.items.map { key(scope, group.title, it) } }
+
+    private fun mergeItems(base: List<String>, extra: List<String>): List<String> =
+        base + extra.filterNot { custom -> base.any { it.equals(custom, ignoreCase = true) } }
+
+    private fun mergeGroups(base: List<ChecklistGroup>, extra: List<ChecklistGroup>): List<ChecklistGroup> {
+        val result = base.map { ChecklistGroup(it.title, it.items) }.toMutableList()
+        extra.forEach { custom ->
+            val index = result.indexOfFirst { it.title.equals(custom.title, ignoreCase = true) }
+            if (index >= 0) {
+                val current = result[index]
+                result[index] = current.copy(items = mergeItems(current.items, custom.items))
+            } else {
+                result.add(custom)
+            }
+        }
+        return result
+    }
 }

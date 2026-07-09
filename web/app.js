@@ -2,7 +2,7 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const app = $("#app");
 const S = window.REI_SCHEMA;
-const state = { token: localStorage.reiToken || "", user: null, reports: [], users: [], view: "login", editing: null, step: 0, surveyStep: 0, dashboardFilter: "levantamentos" };
+const state = { token: localStorage.reiToken || "", user: null, reports: [], users: [], view: "login", editing: null, step: 0, surveyStep: 0, dashboardFilter: "levantamentos", schemaLoaded: false };
 const steps = [
   ["Identificação", "ident"], ["Técnico", "technical"], ["Estoque", "stock"],
   ["Financeiro", "finance"], ["Fiscal", "fiscal"], ["Entrega", "delivery"]
@@ -12,6 +12,7 @@ const surveySections = [
   ["Levantamento de dados – Implantação TGA", [
     ["empresa", "Empresa", "text"], ["contato", "Contato", "text"], ["telefone", "Tel/Cel", "text"],
     ["email", "E-mail", "email"], ["cnpj", "CNPJ", "text"], ["inscricaoEstadual", "Insc. Estadual", "text"],
+    ["_surveyScheduledAt", "Data e hora do levantamento", "datetime-local"],
     ["analistaLevantamento", "Analista responsável pelo levantamento", "text"],
     ["presentesReuniao", "Presentes na reunião", "textarea", 2]
   ]],
@@ -93,6 +94,56 @@ function api(path, options = {}) {
     return data;
   });
 }
+function sameText(a, b) {
+  return String(a || "").trim().toLowerCase() === String(b || "").trim().toLowerCase();
+}
+function appendUniqueText(list, value) {
+  const clean = String(value || "").trim();
+  if (clean && !list.some(item => sameText(item, clean))) list.push(clean);
+}
+function appendSchemaGroup(areaList, title, items = []) {
+  const cleanTitle = String(title || "").trim();
+  if (!cleanTitle) return;
+  let group = areaList.find(([groupTitle]) => sameText(groupTitle, cleanTitle));
+  if (!group) {
+    group = [cleanTitle, []];
+    areaList.push(group);
+  }
+  items.forEach(item => appendUniqueText(group[1], item));
+}
+function appendSurveyField(sectionFields, field) {
+  const key = String(field?.key || "").trim();
+  const label = String(field?.label || "").trim();
+  const type = String(field?.type || "text").trim();
+  if (!key || !label || sectionFields.some(([existingKey]) => existingKey === key)) return;
+  if (type === "choice") sectionFields.push([key, label, "choice", Array.isArray(field.options) && field.options.length ? field.options : ["Sim", "Não"]]);
+  else if (type === "textarea") sectionFields.push([key, label, "textarea", 3]);
+  else sectionFields.push([key, label, type]);
+}
+function applySchemaOverrides(overrides) {
+  if (!overrides || typeof overrides !== "object") return;
+  const rei = overrides.rei || {};
+  (rei.modules || []).forEach(item => appendUniqueText(S.modules, item));
+  ["technical", "stock", "finance", "fiscal", "supervision"].forEach(area => {
+    (rei[area] || []).forEach(group => appendSchemaGroup(S[area], group.title, group.items || []));
+  });
+  (overrides.levantamento || []).forEach(section => {
+    const title = String(section?.title || "").trim();
+    if (!title) return;
+    let target = surveySections.find(([sectionTitle]) => sameText(sectionTitle, title));
+    if (!target) {
+      target = [title, []];
+      surveySections.push(target);
+    }
+    (section.fields || []).forEach(field => appendSurveyField(target[1], field));
+  });
+}
+async function loadSchemaOverrides() {
+  if (state.schemaLoaded) return;
+  const overrides = await api("/api/schema-overrides").catch(() => null);
+  applySchemaOverrides(overrides);
+  state.schemaLoaded = true;
+}
 function newId() {
   if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
   const part = () => Math.floor((1 + Math.random()) * 0x10000).toString(16).slice(1);
@@ -108,12 +159,13 @@ function blankReport() {
 function field(report, key) { return report?.report?.fields?.[key] || ""; }
 function stage(report) { return field(report, "_stage") || "rei"; }
 function reportPdfTitle(report) {
+  const prefix = ["levantamento_pendente", "rei_pendente"].includes(stage(report)) ? "Levantamento de Dados" : "Relatorio de Entrega";
   const client = String(report?.client || field(report, "cliente") || "Cliente")
     .replace(/[\\/:*?"<>|\r\n]+/g, " ")
     .replace(/\s+/g, " ")
     .trim()
     .replace(/\.+$/g, "") || "Cliente";
-  return `Relatorio de Entrega - ${client}`;
+  return `${prefix} - ${client}`;
 }
 function score(report) {
   const explicit = Number(String(field(report, "_supervisionScore")).replace(",", "."));
@@ -191,7 +243,7 @@ function renderLogin(error = "") {
     try {
       const res = await api("/api/auth/login", { method: "POST", body: JSON.stringify(form) });
       state.token = res.token; state.user = res.user; localStorage.reiToken = res.token;
-      await loadUsers(); await loadReports(); renderDashboard();
+      await loadSchemaOverrides(); await loadUsers(); await loadReports(); renderDashboard();
     } catch (err) { renderLogin(err.message); }
   };
 }
@@ -269,7 +321,7 @@ function renderDashboard() {
     </section>
     ${state.user.role !== "supervisor" ? latestEvaluations(evaluations.slice(0,3)) : ""}
     ${state.user.role === "supervisor" ? `<div class="footer-actions no-print"><button class="btn" data-action="new-client">${icon("plus")}Cadastrar cliente</button></div>` : ""}
-    ${state.user.role !== "supervisor" ? `<div class="footer-actions no-print"><button class="btn" data-action="new">${icon("plus")}Nova implantação</button></div>` : ""}`);
+    ${state.user.role !== "supervisor" ? `<div class="footer-actions no-print"><button class="btn secondary" data-action="new-survey">${icon("file")}Novo levantamento</button><button class="btn" data-action="new">${icon("plus")}Nova implantação</button></div>` : ""}`);
 }
 function metric(label, value, iconName = "file") { return `<div class="card metric"><span class="metric-icon">${icon(iconName)}</span><span>${esc(label)}</span><b>${esc(value)}</b></div>`; }
 function workflowCard(group, active) {
@@ -343,6 +395,18 @@ function blankClientPayload() {
   const payload = blankReport();
   payload.report.fields._stage = "levantamento_pendente";
   payload.report.fields._createdBy = state.user?.username || "";
+  return payload;
+}
+function blankSurveyPayload() {
+  const payload = blankReport();
+  const username = state.user?.username || "";
+  const name = state.user?.fullName || state.user?.full_name || username;
+  payload.report.fields._stage = "levantamento_pendente";
+  payload.report.fields._createdBy = username;
+  payload.report.fields._ownerUsername = username;
+  payload.report.fields._assignedImplantadorUsername = username;
+  payload.report.fields._assignedImplantadorName = name;
+  payload.report.fields.analistaLevantamento = name;
   return payload;
 }
 function renderClientForm(payload = blankClientPayload()) {
@@ -532,18 +596,19 @@ function renderViewer(r) {
   state.viewing = r;
   const f = r.report.fields, checks = new Set(r.report.checks||[]);
   const evaluationScore = score(r);
+  const surveyLike = ["levantamento_pendente", "rei_pendente"].includes(stage(r));
   const actions = [
     `<button class="btn secondary" data-action="dashboard">Voltar</button>`,
     state.user.role === "supervisor" && stage(r) === "levantamento_pendente" ? `<button class="btn" data-action="edit-client" data-id="${esc(r.id)}">Editar cadastro</button>` : "",
     state.user.role !== "supervisor" ? `<button class="btn" data-action="edit" data-id="${esc(r.id)}">Editar</button>` : "",
-    state.user.role === "supervisor" && isReadyForSupervisorEvaluation(r) ? `<button class="btn green" data-action="evaluate" data-id="${esc(r.id)}">Avaliar</button>` : "",
-    isReadyForSupervisorEvaluation(r) ? `<button class="btn" data-action="print">Reimprimir PDF</button>` : ""
+    state.user.role === "supervisor" && isReadyForSupervisorEvaluation(r) && !hasEvaluation(r) ? `<button class="btn green" data-action="evaluate" data-id="${esc(r.id)}">Avaliar</button>` : "",
+    (surveyLike || isReadyForSupervisorEvaluation(r)) ? `<button class="btn" data-action="print">${surveyLike ? "Imprimir levantamento" : "Reimprimir PDF"}</button>` : ""
   ].filter(Boolean).join("");
   shell(`<section class="hero viewer"><h1>${esc(r.client || f.cliente)}</h1><p>${fmtDate(r.completed_at)} · ${esc(r.consultant || f.consultor || "")}</p></section>
     <section class="card viewer">${dl([["Cliente / Projeto",f.cliente],["Implantador responsável",assignedName(r)],["Contato",f.contato],["Tel/Cel",f.telefone],["E-mail",f.email],["CNPJ",f.cnpj],["Consultor",f.consultor],["Início",f.inicio],["Término",f.termino],["Status",r.report.deliveryStatus],["Serviços executados",f.servicosExecutados],["Pendências",f.pendencias]])}</section>
     ${hasEvaluation(r)?supervisionEvaluationCard(r, evaluationScore, checks):""}
     <section class="card"><h2>Checklists marcados</h2>${selected(S.technical,"tecnico",checks)}${selected(S.stock,"estoque",checks)}${selected(S.finance,"financeiro",checks)}${selected(S.fiscal,"fiscal",checks)}</section>
-    ${printReportHtml(r)}
+    ${surveyLike ? printSurveyHtml(r) : printReportHtml(r)}
     <div class="footer-actions no-print">${actions}</div>`);
 }
 function dl(items){return `<dl>${items.map(([k,v])=>`<dt>${esc(k)}</dt><dd>${esc(v||"Não informado")}</dd>`).join("")}</dl>`}
@@ -609,6 +674,37 @@ function printReportHtml(r) {
     ${(data.attachments || []).length ? `${pSection("EVIDÊNCIAS E ANEXOS")}${pAttachments(data.attachments)}` : ""}
     <footer class="print-footer">DuBrasil Soluções • suporte: (34) 3322-8500</footer>
   </article>`;
+}
+function printSurveyHtml(r) {
+  const data = r.report || {}, f = data.fields || {};
+  return `<article class="print-report">
+    <header class="print-header">
+      <div class="print-brand"><img src="/web/assets/logo_dubrasil.png" alt="DuBrasil Soluções"></div>
+      <div><h1>LEVANTAMENTO DE DADOS</h1><p>Sistema de Gestão TGA • Pré-implantação</p></div>
+    </header>
+    ${pSection("IDENTIFICAÇÃO DO CLIENTE")}
+    ${pInfoTable([
+      ["Cliente / Projeto", f.cliente || f.empresa], ["Contato", f.contato],
+      ["Tel/Cel", f.telefone], ["E-mail", f.email],
+      ["CNPJ", f.cnpj], ["Inscrição Estadual", f.inscricaoEstadual],
+      ["Data e hora do levantamento", formatSurveyDateTime(f._surveyScheduledAt)], ["Implantador responsável", assignedName(r) || f.analistaLevantamento]
+    ])}
+    ${surveySections.slice(1).map(([title, fields]) => `${pSection(title.toUpperCase())}${pSurveyFields(fields, f)}`).join("")}
+    ${pSection("ANOTAÇÕES GERAIS")}
+    ${pParagraph("Presentes na reunião", f.presentesReuniao)}
+    <footer class="print-footer">DuBrasil Soluções • suporte: (34) 3322-8500</footer>
+  </article>`;
+}
+function pSurveyFields(fields, f) {
+  const choices = fields.filter(([, , type]) => type === "choice");
+  const texts = fields.filter(([, , type]) => type !== "choice");
+  return `${choices.length ? `<div class="print-info">${choices.map(([key,label]) => `<div><small>${esc(label).toUpperCase()}</small><b>${esc(f[key] || "—")}</b></div>`).join("")}</div>` : ""}
+    ${texts.map(([key,label,type]) => type === "textarea" ? pParagraph(label, f[key]) : pInfoTable([[label, f[key]]])).join("")}`;
+}
+function formatSurveyDateTime(value) {
+  if (!value) return "";
+  const match = String(value).match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/);
+  return match ? `${match[3]}/${match[2]}/${match[1]} ${match[4]}:${match[5]}` : value;
 }
 function pSection(title) { return `<h2 class="print-section">${esc(title)}</h2>`; }
 function pInfoTable(items) {
@@ -717,6 +813,7 @@ document.addEventListener("click", async e => {
     if (action === "logout") { await api("/api/auth/logout",{method:"POST"}).catch(()=>{}); localStorage.removeItem("reiToken"); state.token=""; state.user=null; renderLogin(); }
     if (action === "dashboard") { await loadUsers(); await loadReports(); renderDashboard(); }
     if (action === "new" && state.user.role !== "supervisor") renderEditor(blankReport());
+    if (action === "new-survey" && state.user.role !== "supervisor") renderSurvey(blankSurveyPayload());
     if (action === "new-client" && state.user.role === "supervisor") renderClientForm();
     if (action === "open") {
       const report = state.reports.find(r => r.id === id);
@@ -784,6 +881,6 @@ document.addEventListener("click", async e => {
 });
 
 (async function init() {
-  if (await loadMe()) { await loadUsers(); await loadReports(); renderDashboard(); }
+  if (await loadMe()) { await loadSchemaOverrides(); await loadUsers(); await loadReports(); renderDashboard(); }
   else renderLogin();
 })();

@@ -25,6 +25,7 @@ class AuthClient(private val context: Context) {
             .onSuccess { session ->
                 AuthStore(context).save(session, baseUrl)
                 localAuth.cacheSession(session, password, baseUrl)
+                CentralSyncClient(context).fetchSchemaOverrides()
                 SyncScheduler.enqueue(context)
             }
             .getOrElse { onlineError ->

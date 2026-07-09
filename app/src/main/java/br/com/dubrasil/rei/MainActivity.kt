@@ -1,9 +1,12 @@
 package br.com.dubrasil.rei
 
+import android.Manifest
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.provider.OpenableColumns
 import android.app.TimePickerDialog
@@ -121,6 +124,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.IntSize
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.core.content.FileProvider
+import androidx.core.content.ContextCompat
 import br.com.dubrasil.rei.model.ChecklistGroup
 import br.com.dubrasil.rei.model.ReportData
 import br.com.dubrasil.rei.model.ReportAttachment
@@ -129,6 +133,7 @@ import br.com.dubrasil.rei.model.ReportSchema
 import br.com.dubrasil.rei.data.AuthClient
 import br.com.dubrasil.rei.data.AuthStore
 import br.com.dubrasil.rei.data.AuthUser
+import br.com.dubrasil.rei.data.ReiReminderScheduler
 import br.com.dubrasil.rei.pdf.PdfExporter
 import br.com.dubrasil.rei.ui.theme.ReiTheme
 import kotlinx.coroutines.Dispatchers
@@ -174,7 +179,7 @@ private val steps = listOf(
     Step("Entrega e assinaturas", "Entrega", "Conclusão, evidências e responsáveis")
 )
 
-private enum class SurveyFieldType { Text, TextArea, Choice }
+private enum class SurveyFieldType { Text, TextArea, Choice, DateTime }
 private data class SurveyFieldDef(
     val key: String,
     val label: String,
@@ -185,7 +190,7 @@ private data class SurveyFieldDef(
 private data class SurveySectionDef(val title: String, val fields: List<SurveyFieldDef>)
 
 private val yesNoOptions = listOf("Sim", "Não")
-private val surveySections = listOf(
+private val baseSurveySections = listOf(
     SurveySectionDef("Levantamento de dados – Implantação TGA", listOf(
         SurveyFieldDef("empresa", "Empresa"),
         SurveyFieldDef("contato", "Contato"),
@@ -193,6 +198,7 @@ private val surveySections = listOf(
         SurveyFieldDef("email", "E-mail"),
         SurveyFieldDef("cnpj", "CNPJ"),
         SurveyFieldDef("inscricaoEstadual", "Insc. Estadual"),
+        SurveyFieldDef("_surveyScheduledAt", "Data e hora do levantamento"),
         SurveyFieldDef("analistaLevantamento", "Analista responsável pelo levantamento"),
         SurveyFieldDef("presentesReuniao", "Presentes na reunião", SurveyFieldType.TextArea, minLines = 2)
     )),
@@ -241,6 +247,39 @@ private val surveySections = listOf(
     SurveySectionDef("Fluxograma inicial", listOf(SurveyFieldDef("fluxogramaInicial", "Fluxograma inicial", SurveyFieldType.TextArea, minLines = 5)))
 )
 
+private fun activeSurveySections(): List<SurveySectionDef> {
+    val result = baseSurveySections.map { it.copy(fields = it.fields.toMutableList()) }.toMutableList()
+    ReportSchema.surveySections.forEach { custom ->
+        val index = result.indexOfFirst { it.title.equals(custom.title, ignoreCase = true) }
+        val customFields = custom.fields.mapNotNull { field ->
+            val type = when (field.type.lowercase(Locale.ROOT)) {
+                "choice" -> SurveyFieldType.Choice
+                "textarea" -> SurveyFieldType.TextArea
+                "date", "datetime-local" -> SurveyFieldType.DateTime
+                else -> SurveyFieldType.Text
+            }
+            if (field.key.isBlank() || field.label.isBlank()) null
+            else SurveyFieldDef(
+                key = field.key,
+                label = field.label,
+                type = type,
+                options = if (type == SurveyFieldType.Choice) field.options.ifEmpty { yesNoOptions } else emptyList(),
+                minLines = if (type == SurveyFieldType.TextArea) field.minLines.coerceAtLeast(3) else 1
+            )
+        }
+        if (index >= 0) {
+            val current = result[index]
+            val merged = current.fields + customFields.filterNot { customField ->
+                current.fields.any { it.key == customField.key }
+            }
+            result[index] = current.copy(fields = merged)
+        } else if (customFields.isNotEmpty()) {
+            result.add(SurveySectionDef(custom.title, customFields))
+        }
+    }
+    return result
+}
+
 private fun surveyTabTitle(title: String): String = when {
     title.startsWith("Levantamento", ignoreCase = true) -> "Identificação"
     title.equals("Movimentos de entrada", ignoreCase = true) -> "Entrada"
@@ -258,6 +297,15 @@ private val Border = Color(0xFFE1E5EE)
 @Composable
 private fun ReiApp(vm: ReportViewModel = viewModel()) {
     val context = androidx.compose.ui.platform.LocalContext.current
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
+    LaunchedEffect(Unit) {
+        ReiReminderScheduler.scheduleDailyReminders(context)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
     val authStore = remember { AuthStore(context) }
     var currentUser by remember { mutableStateOf(authStore.currentUser()) }
     val report = vm.report
@@ -375,12 +423,13 @@ private fun ReiApp(vm: ReportViewModel = viewModel()) {
                 viewingReportId = null
                 showNewClientDialog = true
             }) else null,
-            onEvaluate = if (authenticatedUser.isSupervisor && viewedReport.isReadyForSupervisorEvaluation()) ({ score, rating, supervisionChecks ->
+            onEvaluate = if (authenticatedUser.isSupervisor && viewedReport.isReadyForSupervisorEvaluation() && !hasSupervisorEvaluation(viewedReport.report)) ({ score, rating, supervisionChecks ->
                 vm.saveSupervisorEvaluation(viewedReport.id, authenticatedUser.username, score, rating, supervisionChecks)
                 Toast.makeText(context, "Avaliação da supervisão salva", Toast.LENGTH_LONG).show()
             }) else null,
-            onReprint = if (viewedReport.isReadyForSupervisorEvaluation() && !viewedReport.isSurveyStage()) ({
-                exportAndSharePdf(reportPdfFileName(viewedReport.client), viewedReport.report, false)
+            onReprint = if (viewedReport.isReadyForSupervisorEvaluation() || viewedReport.isSurveyStage()) ({
+                val fileName = if (viewedReport.isSurveyStage()) surveyPdfFileName(viewedReport.client) else reportPdfFileName(viewedReport.client)
+                exportAndSharePdf(fileName, viewedReport.report, false)
             }) else null
         )
         return
@@ -394,6 +443,10 @@ private fun ReiApp(vm: ReportViewModel = viewModel()) {
             onLogout = logout,
             onResumeDraft = { currentStep = 0; showDashboard = false },
             onNewReport = { vm.startNewReport(authenticatedUser.username); currentStep = 0; showDashboard = false },
+            onNewSurvey = {
+                val id = vm.startNewSurvey(authenticatedUser.username, authenticatedUser.fullName)
+                surveyReportId = id
+            },
             onOpenReport = {
                 if (!authenticatedUser.isSupervisor && it.stage() == "rei_pendente") {
                     vm.editCompletedReport(it.id, authenticatedUser.username)
@@ -667,6 +720,7 @@ private fun DashboardScreen(
     onLogout: () -> Unit,
     onResumeDraft: () -> Unit,
     onNewReport: () -> Unit,
+    onNewSurvey: () -> Unit,
     onOpenReport: (ImplementationSummary) -> Unit,
     onOpenSurvey: (ImplementationSummary) -> Unit,
     onNewClient: () -> Unit
@@ -724,22 +778,36 @@ private fun DashboardScreen(
                     }
                 }
             } else {
-            Surface(
-                modifier = Modifier.navigationBarsPadding(),
-                color = Color.White,
-                shadowElevation = 12.dp
-            ) {
-                Button(
-                    onClick = onNewReport,
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 12.dp).height(54.dp),
-                    shape = RoundedCornerShape(17.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = Navy)
+                Surface(
+                    modifier = Modifier.navigationBarsPadding(),
+                    color = Color.White,
+                    shadowElevation = 12.dp
                 ) {
-                    Icon(Icons.Outlined.Add, null, Modifier.size(24.dp))
-                    Spacer(Modifier.width(9.dp))
-                    Text("Nova implantação", fontWeight = FontWeight.Bold)
+                    Row(
+                        Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 12.dp),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = onNewSurvey,
+                            modifier = Modifier.weight(1f).height(54.dp),
+                            shape = RoundedCornerShape(17.dp)
+                        ) {
+                            Icon(Icons.Outlined.Description, null, Modifier.size(21.dp))
+                            Spacer(Modifier.width(7.dp))
+                            Text("Novo levantamento", fontWeight = FontWeight.Bold)
+                        }
+                        Button(
+                            onClick = onNewReport,
+                            modifier = Modifier.weight(1f).height(54.dp),
+                            shape = RoundedCornerShape(17.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = Navy)
+                        ) {
+                            Icon(Icons.Outlined.Add, null, Modifier.size(21.dp))
+                            Spacer(Modifier.width(7.dp))
+                            Text("Nova implantação", fontWeight = FontWeight.Bold)
+                        }
+                    }
                 }
-            }
             }
         }
     ) { padding ->
@@ -953,9 +1021,10 @@ private fun SurveyScreen(
     onComplete: () -> Unit
 ) {
     var surveyStep by rememberSaveable(data.field("_id")) { mutableIntStateOf(0) }
-    val currentIndex = surveyStep.coerceIn(0, surveySections.lastIndex)
-    val currentSection = surveySections[currentIndex]
-    val progress = (currentIndex + 1f) / surveySections.size
+    val sections = remember(vm.schemaVersion) { activeSurveySections() }
+    val currentIndex = surveyStep.coerceIn(0, sections.lastIndex)
+    val currentSection = sections[currentIndex]
+    val progress = (currentIndex + 1f) / sections.size
     Scaffold(
         containerColor = PageBackground,
         topBar = {
@@ -988,9 +1057,9 @@ private fun SurveyScreen(
                         Spacer(Modifier.width(7.dp))
                         Text("Salvar")
                     }
-                    if (currentIndex < surveySections.lastIndex) {
+                    if (currentIndex < sections.lastIndex) {
                         Button(
-                            onClick = { surveyStep = (surveyStep + 1).coerceAtMost(surveySections.lastIndex) },
+                            onClick = { surveyStep = (surveyStep + 1).coerceAtMost(sections.lastIndex) },
                             modifier = Modifier.weight(1f).height(52.dp),
                             shape = RoundedCornerShape(16.dp),
                             colors = ButtonDefaults.buttonColors(containerColor = Navy)
@@ -1022,7 +1091,7 @@ private fun SurveyScreen(
                 Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                surveySections.forEachIndexed { index, section ->
+                sections.forEachIndexed { index, section ->
                     val active = index == currentIndex
                     Button(
                         onClick = { surveyStep = index },
@@ -1040,7 +1109,7 @@ private fun SurveyScreen(
             Spacer(Modifier.height(12.dp))
             SectionCard(
                 currentSection.title,
-                "Etapa ${currentIndex + 1} de ${surveySections.size} • ${((progress * 100).toInt())}% do levantamento"
+                "Etapa ${currentIndex + 1} de ${sections.size} • ${((progress * 100).toInt())}% do levantamento"
             ) {
                 Column(Modifier.padding(horizontal = 9.dp, vertical = 7.dp)) {
                     currentSection.fields
@@ -1092,16 +1161,17 @@ private fun MetricCard(
     label: String
 ) {
     Surface(
-        modifier = modifier.height(138.dp),
+        modifier = modifier.height(92.dp),
         color = Color.White,
         shape = RoundedCornerShape(20.dp),
         border = androidx.compose.foundation.BorderStroke(1.dp, Border)
     ) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.SpaceBetween) {
+        Row(Modifier.fillMaxSize().padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.size(40.dp).clip(CircleShape).background(Color(0xFFF0F3FB)), contentAlignment = Alignment.Center) { icon() }
+            Spacer(Modifier.width(12.dp))
             Column {
-                Text(value, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.ExtraBold, color = Color(0xFF1B2437))
                 Text(label, style = MaterialTheme.typography.bodySmall, color = Color(0xFF778095))
+                Text(value, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.ExtraBold, color = Color(0xFF1B2437))
             }
         }
     }
@@ -1116,12 +1186,12 @@ private fun WorkflowSummaryCard(
 ) {
     val borderColor = if (active) Navy else Border
     Surface(
-        modifier = modifier.height(150.dp).clickable(onClick = onClick),
+        modifier = modifier.height(108.dp).clickable(onClick = onClick),
         color = Color.White,
         shape = RoundedCornerShape(20.dp),
         border = androidx.compose.foundation.BorderStroke(if (active) 2.dp else 1.dp, borderColor)
     ) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.SpaceBetween) {
+        Row(Modifier.fillMaxSize().padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(
                 Modifier.size(40.dp).clip(CircleShape).background(if (active) Navy else Color(0xFFF0F3FB)),
                 contentAlignment = Alignment.Center
@@ -1133,6 +1203,7 @@ private fun WorkflowSummaryCard(
                     else -> Icon(Icons.Outlined.Description, null, tint = if (active) Color.White else Navy)
                 }
             }
+            Spacer(Modifier.width(12.dp))
             Column {
                 Text(group.title, style = MaterialTheme.typography.bodySmall, color = Color(0xFF778095), maxLines = 2)
                 Text(group.value.toString(), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.ExtraBold, color = Color(0xFF1B2437))
@@ -2251,9 +2322,14 @@ private fun RadioOptions(options: List<String>, selected: String, onSelect: (Str
 
 @Composable
 private fun SurveyField(field: SurveyFieldDef, data: ReportData, vm: ReportViewModel) {
+    if (field.key == "_surveyScheduledAt") {
+        DateTimeField(field.label, field.key, data, vm)
+        return
+    }
     when (field.type) {
         SurveyFieldType.Choice -> ChoiceField(field, data, vm)
         SurveyFieldType.TextArea -> FormField(field.label, field.key, data, vm, minLines = field.minLines)
+        SurveyFieldType.DateTime -> DateTimeField(field.label, field.key, data, vm)
         SurveyFieldType.Text -> FormField(field.label, field.key, data, vm)
     }
 }
@@ -2505,6 +2581,16 @@ private fun reportPdfFileName(clientName: String): String {
         .trim('.')
         .ifBlank { "Cliente" }
     return "Relatorio de Entrega - $safeClient.pdf"
+}
+
+private fun surveyPdfFileName(clientName: String): String {
+    val safeClient = clientName
+        .replace(Regex("[\\\\/:*?\"<>|\\r\\n]+"), " ")
+        .replace(Regex("\\s+"), " ")
+        .trim()
+        .trim('.')
+        .ifBlank { "Cliente" }
+    return "Levantamento de Dados - $safeClient.pdf"
 }
 
 private fun saveSignature(

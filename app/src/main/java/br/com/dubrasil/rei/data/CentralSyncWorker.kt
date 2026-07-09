@@ -16,6 +16,7 @@ class CentralSyncWorker(context: Context, params: WorkerParameters) : Worker(con
         val dao = ReiDatabase.getInstance(applicationContext).reportDao()
         val client = CentralSyncClient(applicationContext)
         var failed = false
+        client.fetchSchemaOverrides()
         dao.getPendingSync().forEach { entity ->
             val attempt = System.currentTimeMillis()
             client.send(entity)
@@ -31,9 +32,31 @@ class CentralSyncWorker(context: Context, params: WorkerParameters) : Worker(con
                 }
         }
         if (!failed) {
+            val existingIds = dao.getCompleted().map { it.reportId }.toSet()
             client.fetchCompletedReports()
                 .onSuccess { remoteReports ->
-                    if (remoteReports.isNotEmpty()) dao.upsertAll(remoteReports)
+                    if (remoteReports.isNotEmpty()) {
+                        dao.upsertAll(remoteReports)
+                        remoteReports.filterNot { it.reportId in existingIds }.forEach { report ->
+                            val stage = runCatching {
+                                org.json.JSONObject(report.payloadJson).optJSONObject("fields")?.optString("_stage").orEmpty()
+                            }.getOrDefault("")
+                            when (stage) {
+                                "levantamento_pendente" -> ReiNotifier.notify(
+                                    applicationContext,
+                                    report.reportId.hashCode(),
+                                    "Novo levantamento recebido",
+                                    "${report.client.ifBlank { "Cliente não informado" }} está aguardando preenchimento do levantamento."
+                                )
+                                "rei_pendente" -> ReiNotifier.notify(
+                                    applicationContext,
+                                    report.reportId.hashCode(),
+                                    "R.E.I. liberado para preenchimento",
+                                    "${report.client.ifBlank { "Cliente não informado" }} está aguardando o relatório R.E.I."
+                                )
+                            }
+                        }
+                    }
                 }
                 .onFailure { failed = true }
         }
