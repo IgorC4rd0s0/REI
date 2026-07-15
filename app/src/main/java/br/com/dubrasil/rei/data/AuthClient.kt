@@ -73,4 +73,43 @@ class AuthClient(private val context: Context) {
             connection.disconnect()
         }
     }
+
+    fun changePassword(currentPassword: String, newPassword: String): Result<Unit> = runCatching {
+        val store = AuthStore(context)
+        val baseUrl = AuthStore.normalizeServerUrl(store.serverUrl())
+        val token = store.token()
+        val user = store.currentUser() ?: error("Sessão de usuário não encontrada.")
+        if (baseUrl.isBlank()) error("Conecte-se à rede do escritório para alterar a senha.")
+        if (token.isBlank() || token.startsWith("offline:")) {
+            error("Entre novamente conectado à rede do escritório antes de alterar a senha.")
+        }
+
+        val connection = (URL("$baseUrl/api/auth/change-password").openConnection() as HttpURLConnection).apply {
+            requestMethod = "POST"
+            connectTimeout = 7_000
+            readTimeout = 10_000
+            doOutput = true
+            setRequestProperty("Content-Type", "application/json; charset=utf-8")
+            setRequestProperty("Accept", "application/json")
+            setRequestProperty("Authorization", "Bearer $token")
+        }
+        try {
+            val request = JSONObject()
+                .put("currentPassword", currentPassword)
+                .put("newPassword", newPassword)
+                .put("confirmation", newPassword)
+                .toString()
+            connection.outputStream.use { it.write(request.toByteArray(Charsets.UTF_8)) }
+            val code = connection.responseCode
+            val body = (if (code in 200..299) connection.inputStream else connection.errorStream)
+                ?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
+            if (code !in 200..299) {
+                val message = runCatching { JSONObject(body).optString("error") }.getOrDefault("")
+                error(message.ifBlank { "Não foi possível alterar a senha (HTTP $code)" })
+            }
+            LocalAuthRepository(context).cacheSession(AuthSession(token, user), newPassword, baseUrl)
+        } finally {
+            connection.disconnect()
+        }
+    }
 }

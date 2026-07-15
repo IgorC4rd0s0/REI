@@ -51,18 +51,19 @@ window.REI_SCHEMA = {
     ["Prazos e qualidade", ["Implantação entregue no prazo", "Sem pendências críticas após a finalização", "Cliente satisfeito com o resultado geral"]],
     ["Aprimoramento e postura", ["Proatividade e iniciativa", "Pontualidade e compromisso", "Busca constante por aprendizado técnico"]]
   ],
-  key(scope, group, item) { return `${scope}::${group}::${item}`; },
+  itemLabel(item) { return String(item && typeof item === "object" ? item.label : item || "").trim(); },
+  key(scope, group, item) { return `${scope}::${group}::${this.itemLabel(item)}`; },
   moduleKey(item) { return this.key("dados", "modulos", item); },
   allDeliveryKeys() {
     return [
-      ...this.modules.map(item => this.moduleKey(item)),
+      ...this.modules.map(item => this.moduleKey(this.itemLabel(item))),
       ...["technical:tecnico", "stock:estoque", "finance:financeiro", "fiscal:fiscal"].flatMap(pair => {
         const [name, scope] = pair.split(":");
-        return this[name].flatMap(([group, items]) => items.map(item => this.key(scope, group, item)));
+        return this[name].flatMap(([group, items]) => items.filter(item => !(item && typeof item === "object") || (item.type || "text") === "checkbox").map(item => this.key(scope, group, item)));
       })
     ];
   },
   supervisionKeys() {
-    return this.supervision.flatMap(([group, items]) => items.map(item => this.key("supervisao", group, item)));
+    return this.supervision.flatMap(([group, items]) => items.filter(item => !(item && typeof item === "object") || (item.type || "text") === "checkbox").map(item => this.key("supervisao", group, item)));
   }
 };

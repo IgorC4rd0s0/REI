@@ -4,6 +4,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Shapes
 import androidx.compose.material3.Typography
 import androidx.compose.material3.lightColorScheme
+import androidx.compose.material3.darkColorScheme
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.TextStyle
@@ -12,7 +14,17 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
-private val ReiColors = lightColorScheme(
+enum class ReiThemeMode(val value: String, val label: String) {
+    System("system", "Sistema"),
+    Light("light", "Claro"),
+    Dark("dark", "Escuro");
+
+    companion object {
+        fun fromValue(value: String?): ReiThemeMode = entries.firstOrNull { it.value == value } ?: System
+    }
+}
+
+private val ReiLightColors = lightColorScheme(
     primary = Color(0xFF263A7A),
     onPrimary = Color.White,
     primaryContainer = Color(0xFFDDE3FF),
@@ -21,6 +33,25 @@ private val ReiColors = lightColorScheme(
     surface = Color.White,
     surfaceVariant = Color(0xFFEFF1F7),
     outline = Color(0xFFD7DBE5)
+)
+
+private val ReiDarkColors = darkColorScheme(
+    primary = Color(0xFFB7C5FF),
+    onPrimary = Color(0xFF102158),
+    primaryContainer = Color(0xFF263A7A),
+    onPrimaryContainer = Color(0xFFDDE3FF),
+    secondary = Color(0xFF8BD477),
+    onSecondary = Color(0xFF12380D),
+    background = Color(0xFF0D1220),
+    onBackground = Color(0xFFEEF2FF),
+    surface = Color(0xFF171D2B),
+    onSurface = Color(0xFFEEF2FF),
+    surfaceVariant = Color(0xFF222A3B),
+    onSurfaceVariant = Color(0xFFC2CBDD),
+    outline = Color(0xFF4B566E),
+    outlineVariant = Color(0xFF343D51),
+    error = Color(0xFFFFB4AB),
+    onError = Color(0xFF690005)
 )
 
 private val ReiTypography = Typography(
@@ -39,6 +70,16 @@ private val ReiShapes = Shapes(
 )
 
 @Composable
-fun ReiTheme(content: @Composable () -> Unit) {
-    MaterialTheme(colorScheme = ReiColors, typography = ReiTypography, shapes = ReiShapes, content = content)
+fun ReiTheme(themeMode: ReiThemeMode = ReiThemeMode.System, content: @Composable () -> Unit) {
+    val darkTheme = when (themeMode) {
+        ReiThemeMode.System -> isSystemInDarkTheme()
+        ReiThemeMode.Light -> false
+        ReiThemeMode.Dark -> true
+    }
+    MaterialTheme(
+        colorScheme = if (darkTheme) ReiDarkColors else ReiLightColors,
+        typography = ReiTypography,
+        shapes = ReiShapes,
+        content = content
+    )
 }

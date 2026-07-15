@@ -133,7 +133,7 @@ class ReportViewModel(application: Application) : AndroidViewModel(application) 
             "_createdBy" to item.report.field("_createdBy").ifBlank { supervisorUsername }
         ))
         val updated = item.copy(
-            client = data.field("cliente").ifBlank { data.field("empresa").ifBlank { "Cliente nÃ£o informado" } },
+            client = data.field("cliente").ifBlank { data.field("empresa").ifBlank { "Cliente não informado" } },
             consultant = data.field("consultor"),
             deliveryStatus = data.deliveryStatus,
             checkedItems = deliveryChecklistCount(data),
@@ -160,17 +160,19 @@ class ReportViewModel(application: Application) : AndroidViewModel(application) 
 
     private fun saveCurrentStage(stage: String) {
         val id = report.field("_id").ifBlank { UUID.randomUUID().toString() }
-        val data = report.copy(fields = report.fields + mapOf(
-            "_id" to id,
-            "_stage" to stage,
-            "cliente" to report.field("cliente").ifBlank { report.field("empresa") }
-        ))
+        val now = System.currentTimeMillis()
+        val data = report.copy(fields = report.fields + buildMap {
+            put("_id", id)
+            put("_stage", stage)
+            put("cliente", report.field("cliente").ifBlank { report.field("empresa") })
+            if (stage == "rei_pendente") put("_surveyCompletedAt", now.toString())
+        })
         val existing = history.firstOrNull { it.id == id }
         val summary = ImplementationSummary(
             id = id,
             client = data.field("cliente").ifBlank { "Cliente não informado" },
             consultant = data.field("consultor"),
-            completedAt = existing?.completedAt ?: System.currentTimeMillis(),
+            completedAt = if (stage == "rei_pendente") now else existing?.completedAt ?: now,
             deliveryStatus = data.deliveryStatus,
             checkedItems = deliveryChecklistCount(data),
             report = data

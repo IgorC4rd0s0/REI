@@ -25,6 +25,7 @@ import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -39,6 +40,7 @@ import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -84,6 +86,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
@@ -136,6 +140,7 @@ import br.com.dubrasil.rei.data.AuthUser
 import br.com.dubrasil.rei.data.ReiReminderScheduler
 import br.com.dubrasil.rei.pdf.PdfExporter
 import br.com.dubrasil.rei.ui.theme.ReiTheme
+import br.com.dubrasil.rei.ui.theme.ReiThemeMode
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.launch
@@ -155,7 +160,24 @@ import java.time.temporal.ChronoUnit
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContent { ReiTheme { ReiApp() } }
+        setContent {
+            val context = androidx.compose.ui.platform.LocalContext.current
+            val themePreferences = remember {
+                context.getSharedPreferences("rei_appearance", Context.MODE_PRIVATE)
+            }
+            var themeMode by remember {
+                mutableStateOf(ReiThemeMode.fromValue(themePreferences.getString("theme_mode", "system")))
+            }
+            ReiTheme(themeMode) {
+                ReiApp(
+                    themeMode = themeMode,
+                    onThemeModeChange = { selected ->
+                        themePreferences.edit().putString("theme_mode", selected.value).apply()
+                        themeMode = selected
+                    }
+                )
+            }
+        }
     }
 }
 
@@ -179,7 +201,7 @@ private val steps = listOf(
     Step("Entrega e assinaturas", "Entrega", "Conclusão, evidências e responsáveis")
 )
 
-private enum class SurveyFieldType { Text, TextArea, Choice, DateTime }
+private enum class SurveyFieldType { Text, TextArea, Choice, DateTime, Photo }
 private data class SurveyFieldDef(
     val key: String,
     val label: String,
@@ -256,6 +278,7 @@ private fun activeSurveySections(): List<SurveySectionDef> {
                 "choice" -> SurveyFieldType.Choice
                 "textarea" -> SurveyFieldType.TextArea
                 "date", "datetime-local" -> SurveyFieldType.DateTime
+                "photo" -> SurveyFieldType.Photo
                 else -> SurveyFieldType.Text
             }
             if (field.key.isBlank() || field.label.isBlank()) null
@@ -269,8 +292,10 @@ private fun activeSurveySections(): List<SurveySectionDef> {
         }
         if (index >= 0) {
             val current = result[index]
-            val merged = current.fields + customFields.filterNot { customField ->
-                current.fields.any { it.key == customField.key }
+            val merged = current.fields.toMutableList()
+            customFields.forEach { customField ->
+                val fieldIndex = merged.indexOfFirst { it.key == customField.key }
+                if (fieldIndex >= 0) merged[fieldIndex] = customField else merged.add(customField)
             }
             result[index] = current.copy(fields = merged)
         } else if (customFields.isNotEmpty()) {
@@ -290,12 +315,19 @@ private fun surveyTabTitle(title: String): String = when {
 private val Navy = Color(0xFF263A7A)
 private val NavyDark = Color(0xFF172653)
 private val Green = Color(0xFF58AD45)
-private val PageBackground = Color(0xFFF4F6FA)
-private val Border = Color(0xFFE1E5EE)
+@Composable private fun appPageColor() = MaterialTheme.colorScheme.background
+@Composable private fun appSurfaceColor() = MaterialTheme.colorScheme.surface
+@Composable private fun appBorderColor() = MaterialTheme.colorScheme.outlineVariant
+@Composable private fun appTextColor() = MaterialTheme.colorScheme.onSurface
+@Composable private fun appMutedColor() = MaterialTheme.colorScheme.onSurfaceVariant
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ReiApp(vm: ReportViewModel = viewModel()) {
+private fun ReiApp(
+    themeMode: ReiThemeMode,
+    onThemeModeChange: (ReiThemeMode) -> Unit,
+    vm: ReportViewModel = viewModel()
+) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val notificationPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
     LaunchedEffect(Unit) {
@@ -307,10 +339,12 @@ private fun ReiApp(vm: ReportViewModel = viewModel()) {
         }
     }
     val authStore = remember { AuthStore(context) }
+    val authClient = remember { AuthClient(context) }
     var currentUser by remember { mutableStateOf(authStore.currentUser()) }
     val report = vm.report
     var showDashboard by rememberSaveable { mutableStateOf(currentUser != null) }
     var viewingReportId by rememberSaveable { mutableStateOf<String?>(null) }
+    var viewingSurveyReadOnly by rememberSaveable { mutableStateOf(false) }
     var surveyReportId by rememberSaveable { mutableStateOf<String?>(null) }
     var currentStep by rememberSaveable { mutableIntStateOf(0) }
     var confirmClear by rememberSaveable { mutableStateOf(false) }
@@ -327,6 +361,28 @@ private fun ReiApp(vm: ReportViewModel = viewModel()) {
         return
     }
     val authenticatedUser = currentUser!!
+    val pendingSupervisorEvaluations = vm.history.filter {
+        authenticatedUser.isSupervisor &&
+            !it.isSurveyStage() &&
+            it.isReadyForSupervisorEvaluation() &&
+            !hasSupervisorEvaluation(it.report)
+    }
+    var showEvaluationReminder by rememberSaveable(authenticatedUser.username) { mutableStateOf(false) }
+    LaunchedEffect(
+        authenticatedUser.username,
+        showDashboard,
+        pendingSupervisorEvaluations.joinToString(separator = "|") { it.id }
+    ) {
+        if (showDashboard && pendingSupervisorEvaluations.isNotEmpty()) {
+            val preferences = context.getSharedPreferences("rei_daily_reminders", Context.MODE_PRIVATE)
+            val today = SimpleDateFormat("yyyy-MM-dd", Locale.ROOT).format(Date())
+            val key = "supervisor_evaluation_${authenticatedUser.username.lowercase(Locale.ROOT)}"
+            if (preferences.getString(key, "") != today) {
+                preferences.edit().putString(key, today).apply()
+                showEvaluationReminder = true
+            }
+        }
+    }
     LaunchedEffect(showDashboard, authenticatedUser.username) {
         if (showDashboard) vm.refreshFromServer()
     }
@@ -412,23 +468,24 @@ private fun ReiApp(vm: ReportViewModel = viewModel()) {
     if (viewedReport != null) {
         ReportViewerScreen(
             item = viewedReport,
-            onBack = { viewingReportId = null },
-            onEdit = if (!authenticatedUser.isSupervisor) ({
+            surveyMode = viewingSurveyReadOnly,
+            onBack = { viewingReportId = null; viewingSurveyReadOnly = false },
+            onEdit = if (!viewingSurveyReadOnly && !authenticatedUser.isSupervisor) ({
                 vm.editCompletedReport(viewedReport.id, authenticatedUser.username)
                 viewingReportId = null
                 currentStep = 0
                 showDashboard = false
-            }) else if (viewedReport.stage() == "levantamento_pendente") ({
+            }) else if (!viewingSurveyReadOnly && viewedReport.stage() == "levantamento_pendente") ({
                 editingClientId = viewedReport.id
                 viewingReportId = null
                 showNewClientDialog = true
             }) else null,
-            onEvaluate = if (authenticatedUser.isSupervisor && viewedReport.isReadyForSupervisorEvaluation() && !hasSupervisorEvaluation(viewedReport.report)) ({ score, rating, supervisionChecks ->
+            onEvaluate = if (!viewingSurveyReadOnly && authenticatedUser.isSupervisor && viewedReport.isReadyForSupervisorEvaluation() && !hasSupervisorEvaluation(viewedReport.report)) ({ score, rating, supervisionChecks ->
                 vm.saveSupervisorEvaluation(viewedReport.id, authenticatedUser.username, score, rating, supervisionChecks)
                 Toast.makeText(context, "Avaliação da supervisão salva", Toast.LENGTH_LONG).show()
             }) else null,
-            onReprint = if (viewedReport.isReadyForSupervisorEvaluation() || viewedReport.isSurveyStage()) ({
-                val fileName = if (viewedReport.isSurveyStage()) surveyPdfFileName(viewedReport.client) else reportPdfFileName(viewedReport.client)
+            onReprint = if ((viewingSurveyReadOnly && viewedReport.stage() == "rei_pendente") || (!viewingSurveyReadOnly && viewedReport.isReadyForSupervisorEvaluation())) ({
+                val fileName = if (viewingSurveyReadOnly) surveyPdfFileName(viewedReport.client) else reportPdfFileName(viewedReport.client)
                 exportAndSharePdf(fileName, viewedReport.report, false)
             }) else null
         )
@@ -441,6 +498,11 @@ private fun ReiApp(vm: ReportViewModel = viewModel()) {
             draft = report,
             user = authenticatedUser,
             onLogout = logout,
+            onChangePassword = { currentPassword, newPassword ->
+                authClient.changePassword(currentPassword, newPassword)
+            },
+            themeMode = themeMode,
+            onThemeModeChange = onThemeModeChange,
             onResumeDraft = { currentStep = 0; showDashboard = false },
             onNewReport = { vm.startNewReport(authenticatedUser.username); currentStep = 0; showDashboard = false },
             onNewSurvey = {
@@ -448,6 +510,7 @@ private fun ReiApp(vm: ReportViewModel = viewModel()) {
                 surveyReportId = id
             },
             onOpenReport = {
+                viewingSurveyReadOnly = false
                 if (!authenticatedUser.isSupervisor && it.stage() == "rei_pendente") {
                     vm.editCompletedReport(it.id, authenticatedUser.username)
                     currentStep = 0
@@ -456,9 +519,28 @@ private fun ReiApp(vm: ReportViewModel = viewModel()) {
                     viewingReportId = it.id
                 }
             },
-            onOpenSurvey = { surveyReportId = it.id },
+            onOpenSurvey = {
+                if (it.stage() == "rei_pendente") {
+                    viewingSurveyReadOnly = true
+                    viewingReportId = it.id
+                } else {
+                    viewingSurveyReadOnly = false
+                    surveyReportId = it.id
+                }
+            },
             onNewClient = { editingClientId = null; showNewClientDialog = true }
         )
+        if (showEvaluationReminder && pendingSupervisorEvaluations.isNotEmpty()) {
+            DailyEvaluationReminderDialog(
+                pending = pendingSupervisorEvaluations,
+                onDismiss = { showEvaluationReminder = false },
+                onEvaluateNow = {
+                    val target = pendingSupervisorEvaluations.firstOrNull()
+                    showEvaluationReminder = false
+                    if (target != null) viewingReportId = target.id
+                }
+            )
+        }
         if (showNewClientDialog) NewClientDialog(
             initialFields = editingClientId?.let { id -> vm.history.firstOrNull { it.id == id }?.report?.fields }.orEmpty(),
             onDismiss = { showNewClientDialog = false; editingClientId = null },
@@ -475,7 +557,7 @@ private fun ReiApp(vm: ReportViewModel = viewModel()) {
     }
 
     Scaffold(
-        containerColor = PageBackground,
+        containerColor = appPageColor(),
         topBar = {
             ReiTopBar(
                 onHome = { showDashboard = true },
@@ -524,13 +606,13 @@ private fun ReiApp(vm: ReportViewModel = viewModel()) {
                     steps[currentStep].title,
                     style = MaterialTheme.typography.headlineMedium,
                     fontWeight = FontWeight.Bold,
-                    color = Color(0xFF1B2437)
+                    color = appTextColor()
                 )
                 Spacer(Modifier.height(4.dp))
                 Text(
                     steps[currentStep].description,
                     style = MaterialTheme.typography.bodyMedium,
-                    color = Color(0xFF687086)
+                    color = appMutedColor()
                 )
                 Spacer(Modifier.height(20.dp))
                 when (currentStep) {
@@ -561,7 +643,7 @@ private fun ReiApp(vm: ReportViewModel = viewModel()) {
 
     if (confirmClear) AlertDialog(
         onDismissRequest = { confirmClear = false },
-        icon = { Icon(Icons.Outlined.DeleteOutline, null, tint = Navy) },
+        icon = { Icon(Icons.Outlined.DeleteOutline, null, tint = MaterialTheme.colorScheme.primary) },
         title = { Text("Iniciar novo relatório?") },
         text = { Text("O rascunho atual será apagado deste aparelho.") },
         confirmButton = {
@@ -587,11 +669,70 @@ private fun ReiApp(vm: ReportViewModel = viewModel()) {
 }
 
 @Composable
+private fun DailyEvaluationReminderDialog(
+    pending: List<ImplementationSummary>,
+    onDismiss: () -> Unit,
+    onEvaluateNow: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = { Icon(Icons.Rounded.CheckCircle, null, tint = Green) },
+        title = { Text("Avaliações pendentes", fontWeight = FontWeight.Bold) },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                Text(
+                    "Existem ${pending.size} implantação(ões) concluída(s) aguardando sua avaliação.",
+                    color = appTextColor()
+                )
+                Spacer(Modifier.height(12.dp))
+                pending.take(3).forEach { item ->
+                    Surface(
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+                        shape = RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant
+                    ) {
+                        Text(
+                            item.client.ifBlank { "Cliente não informado" },
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                            fontWeight = FontWeight.Bold,
+                            color = appTextColor()
+                        )
+                    }
+                }
+                if (pending.size > 3) {
+                    Text(
+                        "E mais ${pending.size - 3} implantação(ões).",
+                        modifier = Modifier.padding(top = 6.dp),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = appMutedColor()
+                    )
+                }
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    "Este aviso será apresentado no primeiro acesso de cada dia até que todas sejam avaliadas.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = appMutedColor()
+                )
+            }
+        },
+        confirmButton = {
+            Button(onClick = onEvaluateNow, colors = ButtonDefaults.buttonColors(containerColor = Green)) {
+                Text("Avaliar agora", fontWeight = FontWeight.Bold)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Lembrar amanhã") }
+        }
+    )
+}
+
+@Composable
 private fun LoginScreen(onAuthenticated: (AuthUser) -> Unit) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val scope = rememberCoroutineScope()
     val client = remember { AuthClient(context) }
     val authStore = remember { AuthStore(context) }
+    val scrollState = rememberScrollState()
     var username by rememberSaveable { mutableStateOf("") }
     var password by rememberSaveable { mutableStateOf("") }
     var serverUrl by rememberSaveable { mutableStateOf(authStore.serverUrl()) }
@@ -601,15 +742,19 @@ private fun LoginScreen(onAuthenticated: (AuthUser) -> Unit) {
 
     Box(
         Modifier.fillMaxSize().background(
-            Brush.verticalGradient(listOf(Color(0xFFF8F9FD), Color(0xFFEFF2FA)))
-        ).safeDrawingPadding().imePadding().padding(22.dp),
-        contentAlignment = Alignment.Center
+            Brush.verticalGradient(listOf(appPageColor(), MaterialTheme.colorScheme.surfaceVariant))
+        )
     ) {
+        Column(
+            Modifier.fillMaxSize().safeDrawingPadding().imePadding().verticalScroll(scrollState).padding(22.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
+        ) {
         Card(
-            Modifier.fillMaxWidth(),
+            Modifier.fillMaxWidth().widthIn(max = 430.dp),
             shape = RoundedCornerShape(26.dp),
-            colors = CardDefaults.cardColors(containerColor = Color.White),
-            border = androidx.compose.foundation.BorderStroke(1.dp, Border)
+            colors = CardDefaults.cardColors(containerColor = appSurfaceColor()),
+            border = androidx.compose.foundation.BorderStroke(1.dp, appBorderColor())
         ) {
             Column(Modifier.padding(25.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                 Image(
@@ -619,21 +764,21 @@ private fun LoginScreen(onAuthenticated: (AuthUser) -> Unit) {
                     contentScale = ContentScale.Fit
                 )
                 Spacer(Modifier.height(22.dp))
-                Box(Modifier.size(50.dp).clip(CircleShape).background(Color(0xFFE8EDFF)), contentAlignment = Alignment.Center) {
-                    Icon(Icons.Outlined.Lock, null, tint = Navy, modifier = Modifier.size(27.dp))
+                Box(Modifier.size(50.dp).clip(CircleShape).background(MaterialTheme.colorScheme.surfaceVariant), contentAlignment = Alignment.Center) {
+                    Icon(Icons.Outlined.Lock, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(27.dp))
                 }
                 Spacer(Modifier.height(13.dp))
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Spacer(Modifier.width(42.dp))
                     Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
                         Text("Acesso ao R.E.I.", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
-                        Text("Entre com o usuário cadastrado pelo supervisor.", style = MaterialTheme.typography.bodySmall, color = Color(0xFF778095))
+                        Text("Entre com o usuário cadastrado pelo supervisor.", style = MaterialTheme.typography.bodySmall, color = appMutedColor())
                     }
                     IconButton(
                         onClick = { showConnectionSettings = !showConnectionSettings },
-                        modifier = Modifier.size(42.dp).clip(CircleShape).background(Color(0xFFF0F2F7))
+                        modifier = Modifier.size(42.dp).clip(CircleShape).background(MaterialTheme.colorScheme.surfaceVariant)
                     ) {
-                        Icon(Icons.Outlined.Settings, contentDescription = "Configurar conexão", tint = Navy)
+                        Icon(Icons.Outlined.Settings, contentDescription = "Configurar conexão", tint = MaterialTheme.colorScheme.primary)
                     }
                 }
                 Spacer(Modifier.height(16.dp))
@@ -656,7 +801,7 @@ private fun LoginScreen(onAuthenticated: (AuthUser) -> Unit) {
                     Text(
                         "Use apenas para trocar o servidor. Se já acessou antes, o login funciona offline no celular.",
                         style = MaterialTheme.typography.labelSmall,
-                        color = Color(0xFF778095)
+                        color = appMutedColor()
                     )
                     Spacer(Modifier.height(10.dp))
                 }
@@ -683,7 +828,7 @@ private fun LoginScreen(onAuthenticated: (AuthUser) -> Unit) {
                 )
                 if (error.isNotBlank()) {
                     Spacer(Modifier.height(10.dp))
-                    Text(error, color = Color(0xFFB3261E), style = MaterialTheme.typography.bodySmall)
+                    Text(error, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
                 }
                 Spacer(Modifier.height(17.dp))
                 Button(
@@ -706,10 +851,11 @@ private fun LoginScreen(onAuthenticated: (AuthUser) -> Unit) {
                     colors = ButtonDefaults.buttonColors(containerColor = Navy)
                 ) { Text(if (loading) "Entrando..." else "Entrar", fontWeight = FontWeight.Bold) }
                 Spacer(Modifier.height(14.dp))
-                Text("Servidor do escritório • acesso protegido", style = MaterialTheme.typography.labelMedium, color = Color(0xFF8790A4))
+                Text("Servidor do escritório • acesso protegido", style = MaterialTheme.typography.labelMedium, color = appMutedColor())
             }
         }
     }
+}
 }
 
 @Composable
@@ -718,6 +864,9 @@ private fun DashboardScreen(
     draft: ReportData,
     user: AuthUser,
     onLogout: () -> Unit,
+    onChangePassword: (String, String) -> Result<Unit>,
+    themeMode: ReiThemeMode,
+    onThemeModeChange: (ReiThemeMode) -> Unit,
     onResumeDraft: () -> Unit,
     onNewReport: () -> Unit,
     onNewSurvey: () -> Unit,
@@ -737,74 +886,196 @@ private fun DashboardScreen(
     val lastDate = history.maxByOrNull { it.completedAt }?.let {
         SimpleDateFormat("dd/MM/yyyy", Locale("pt", "BR")).format(Date(it.completedAt))
     } ?: "—"
+    var dashboardArea by rememberSaveable(user.username, "dashboardArea") { mutableStateOf("home") }
     var selectedDashboardFilter by rememberSaveable(user.username) { mutableStateOf("levantamentos") }
-    val allSurveyPending = history.filter { it.stage() == "levantamento_pendente" }
-    val surveyPending = if (user.isSupervisor) allSurveyPending else allSurveyPending.filter { it.isAssignedTo(user.username) }
-    val reiPending = if (user.isSupervisor) {
-        history.filter { it.stage() == "rei_pendente" }
-    } else {
-        history.filter { it.stage() == "rei_pendente" && it.isAssignedTo(user.username) }
-    }
-    val reiReports = history.filterNot { it.isSurveyStage() }
+    val scopedHistory = if (user.isSupervisor) history else history.filter { it.isAssignedTo(user.username) }
+    val surveyPending = scopedHistory.filter { it.stage() == "levantamento_pendente" }
+    val reiPending = scopedHistory.filter { it.stage() == "rei_pendente" }
+    val surveyCompleted = reiPending
+    val allSurveys = surveyPending + surveyCompleted
+    val reiReports = scopedHistory.filterNot { it.isSurveyStage() }
     val inProgress = reiReports.filterNot { it.isReadyForSupervisorEvaluation() }
     val concluded = reiReports.filter { it.isReadyForSupervisorEvaluation() }
-    val dashboardGroups = listOf(
-        DashboardGroup("levantamentos", "Levantamentos pendentes", surveyPending.size, if (user.isSupervisor) "Clientes aguardando levantamento" else "Disponíveis para preencher", "file", surveyPending, "Nenhum levantamento pendente."),
-        DashboardGroup("pendentes", "Implantações pendentes", reiPending.size, "R.E.I. liberado para iniciar", "briefcase", reiPending, "Nenhuma implantação pendente para iniciar o R.E.I."),
-        DashboardGroup("andamento", "Implantações em andamento", inProgress.size, "Iniciadas e ainda não concluídas", "timer", inProgress, "Nenhuma implantação em andamento."),
-        DashboardGroup("concluidas", "Implantações concluídas", concluded.size, "Disponíveis para visualização/PDF", "calendar", concluded, "Nenhuma implantação concluída.")
-    )
+    val dashboardGroups = if (dashboardArea == "levantamentos") {
+        listOf(
+            DashboardGroup("levantamentos", "Levantamentos pendentes", surveyPending.size, if (user.isSupervisor) "Clientes aguardando levantamento" else "Disponíveis para preencher", "file", surveyPending, "Nenhum levantamento pendente."),
+            DashboardGroup("levantamentos_concluidos", "Levantamentos concluídos", surveyCompleted.size, "Somente visualização e impressão", "calendar", surveyCompleted, "Nenhum levantamento concluído.")
+        )
+    } else {
+        listOf(
+            DashboardGroup("pendentes", "Implantações pendentes", reiPending.size, "R.E.I. liberado para iniciar", "briefcase", reiPending, "Nenhuma implantação pendente para iniciar o R.E.I."),
+            DashboardGroup("andamento", "Implantações em andamento", inProgress.size, "Iniciadas e ainda não concluídas", "timer", inProgress, "Nenhuma implantação em andamento."),
+            DashboardGroup("concluidas", "Implantações concluídas", concluded.size, "Disponíveis para visualização/PDF", "calendar", concluded, "Nenhuma implantação concluída.")
+        )
+    }
     val activeDashboardGroup = dashboardGroups.firstOrNull { it.key == selectedDashboardFilter } ?: dashboardGroups.first()
 
+    if (dashboardArea == "home") {
+        Scaffold(
+            containerColor = appPageColor(),
+            topBar = { DashboardHeader(user, onLogout, onChangePassword, themeMode, onThemeModeChange) }
+        ) { padding ->
+            Column(
+                Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState())
+                    .padding(horizontal = 18.dp, vertical = 18.dp)
+            ) {
+                Column(
+                    Modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp))
+                        .background(Brush.linearGradient(listOf(NavyDark, Navy))).padding(20.dp)
+                ) {
+                    Text(if (user.isSupervisor) "ÁREA DO SUPERVISOR" else "ÁREA DO IMPLANTADOR", color = Color(0xFFBFC9F5), style = MaterialTheme.typography.labelMedium)
+                    Spacer(Modifier.height(6.dp))
+                    Text("Escolha a operação", color = Color.White, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.height(6.dp))
+                    Text("Acesse implantações R.E.I. ou levantamentos em telas separadas.", color = Color(0xFFD9DFF6), style = MaterialTheme.typography.bodyMedium)
+                }
+                Spacer(Modifier.height(14.dp))
+                BoxWithConstraints(Modifier.fillMaxWidth()) {
+                    if (maxWidth < 600.dp) {
+                        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                            DashboardAreaButton(
+                                modifier = Modifier.fillMaxWidth(),
+                                title = "Implantação",
+                                subtitle = "Dashboard, relatórios e avaliações.",
+                                value = (reiPending.size + reiReports.size).toString(),
+                                icon = "briefcase",
+                                onClick = {
+                                    dashboardArea = "implantacoes"
+                                    selectedDashboardFilter = "pendentes"
+                                }
+                            )
+                            DashboardAreaButton(
+                                modifier = Modifier.fillMaxWidth(),
+                                title = "Levantamentos",
+                                subtitle = "Coleta de dados e pendências.",
+                                value = allSurveys.size.toString(),
+                                icon = "file",
+                                onClick = {
+                                    dashboardArea = "levantamentos"
+                                    selectedDashboardFilter = "levantamentos"
+                                }
+                            )
+                        }
+                    } else {
+                        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            DashboardAreaButton(
+                                modifier = Modifier.weight(1f),
+                                title = "Implantação",
+                                subtitle = "Dashboard, relatórios e avaliações.",
+                                value = (reiPending.size + reiReports.size).toString(),
+                                icon = "briefcase",
+                                onClick = {
+                                    dashboardArea = "implantacoes"
+                                    selectedDashboardFilter = "pendentes"
+                                }
+                            )
+                            DashboardAreaButton(
+                                modifier = Modifier.weight(1f),
+                                title = "Levantamentos",
+                                subtitle = "Coleta de dados e pendências.",
+                                value = allSurveys.size.toString(),
+                                icon = "file",
+                                onClick = {
+                                    dashboardArea = "levantamentos"
+                                    selectedDashboardFilter = "levantamentos"
+                                }
+                            )
+                        }
+                    }
+                }
+                Spacer(Modifier.height(18.dp))
+                Text("Resumo rápido", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = appTextColor())
+                Spacer(Modifier.height(10.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    MetricCard(
+                        modifier = Modifier.weight(1f),
+                        icon = { Icon(Icons.Outlined.BusinessCenter, null, tint = MaterialTheme.colorScheme.primary) },
+                        value = (reiPending.size + reiReports.size).toString(),
+                        label = "Implantações"
+                    )
+                    MetricCard(
+                        modifier = Modifier.weight(1f),
+                        icon = { Icon(Icons.Outlined.Description, null, tint = MaterialTheme.colorScheme.primary) },
+                        value = allSurveys.size.toString(),
+                        label = "Levantamentos"
+                    )
+                }
+                Spacer(Modifier.height(12.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    MetricCard(
+                        modifier = Modifier.weight(1f),
+                        icon = { Icon(Icons.Rounded.CheckCircle, null, tint = Green) },
+                        value = evaluations.size.toString(),
+                        label = "Avaliações"
+                    )
+                    MetricCard(
+                        modifier = Modifier.weight(1f),
+                        icon = { Icon(Icons.Outlined.CalendarMonth, null, tint = MaterialTheme.colorScheme.primary) },
+                        value = lastDate,
+                        label = "Última entrega"
+                    )
+                }
+                Spacer(Modifier.height(18.dp))
+                Text("Gráficos separados", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = appTextColor())
+                Spacer(Modifier.height(10.dp))
+                MonthlyDeliveriesChart(reiPending + reiReports, "Implantações por mês")
+                Spacer(Modifier.height(12.dp))
+                MonthlyDeliveriesChart(surveyPending, "Levantamentos por mês")
+                Spacer(Modifier.height(12.dp))
+            }
+        }
+        return
+    }
+
     Scaffold(
-        containerColor = PageBackground,
-        topBar = { DashboardHeader(user, onLogout) },
+        containerColor = appPageColor(),
+        topBar = { DashboardHeader(user, onLogout, onChangePassword, themeMode, onThemeModeChange) },
         bottomBar = {
-            if (user.isSupervisor) {
+            if (user.isSupervisor && dashboardArea == "levantamentos") {
                 Surface(
                     modifier = Modifier.navigationBarsPadding(),
-                    color = Color.White,
+                    color = appSurfaceColor(),
                     shadowElevation = 12.dp
                 ) {
                     Button(
                         onClick = onNewClient,
                         modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 12.dp).height(54.dp),
                         shape = RoundedCornerShape(17.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = Navy)
+                        colors = ButtonDefaults.buttonColors(containerColor = Navy, contentColor = Color.White)
                     ) {
                         Icon(Icons.Outlined.Add, null, Modifier.size(24.dp))
                         Spacer(Modifier.width(9.dp))
                         Text("Cadastrar cliente", fontWeight = FontWeight.Bold)
                     }
                 }
-            } else {
+            } else if (!user.isSupervisor) {
                 Surface(
                     modifier = Modifier.navigationBarsPadding(),
-                    color = Color.White,
+                    color = appSurfaceColor(),
                     shadowElevation = 12.dp
                 ) {
-                    Row(
-                        Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 12.dp),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
+                    Row(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 12.dp)) {
+                        if (dashboardArea == "levantamentos") {
                         OutlinedButton(
                             onClick = onNewSurvey,
-                            modifier = Modifier.weight(1f).height(54.dp),
+                            modifier = Modifier.fillMaxWidth().height(54.dp),
                             shape = RoundedCornerShape(17.dp)
                         ) {
                             Icon(Icons.Outlined.Description, null, Modifier.size(21.dp))
                             Spacer(Modifier.width(7.dp))
                             Text("Novo levantamento", fontWeight = FontWeight.Bold)
                         }
+                        } else {
                         Button(
                             onClick = onNewReport,
-                            modifier = Modifier.weight(1f).height(54.dp),
+                            modifier = Modifier.fillMaxWidth().height(54.dp),
                             shape = RoundedCornerShape(17.dp),
-                            colors = ButtonDefaults.buttonColors(containerColor = Navy)
+                            colors = ButtonDefaults.buttonColors(containerColor = Navy, contentColor = Color.White)
                         ) {
                             Icon(Icons.Outlined.Add, null, Modifier.size(21.dp))
                             Spacer(Modifier.width(7.dp))
                             Text("Nova implantação", fontWeight = FontWeight.Bold)
+                        }
                         }
                     }
                 }
@@ -815,32 +1086,44 @@ private fun DashboardScreen(
             Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState())
                 .padding(horizontal = 18.dp, vertical = 20.dp)
         ) {
+            OutlinedButton(
+                onClick = {
+                    dashboardArea = "home"
+                    selectedDashboardFilter = "levantamentos"
+                },
+                shape = RoundedCornerShape(15.dp)
+            ) {
+                Icon(Icons.Outlined.Home, null, Modifier.size(19.dp))
+                Spacer(Modifier.width(7.dp))
+                Text("Voltar")
+            }
+            Spacer(Modifier.height(12.dp))
             Column(
                 Modifier.fillMaxWidth().clip(RoundedCornerShape(26.dp))
                     .background(Brush.linearGradient(listOf(NavyDark, Navy))).padding(22.dp)
             ) {
-                Text("PAINEL DE IMPLANTAÇÕES", color = Color(0xFFBFC9F5), style = MaterialTheme.typography.labelMedium)
+                Text(if (dashboardArea == "levantamentos") "LEVANTAMENTOS" else "IMPLANTAÇÃO", color = Color(0xFFBFC9F5), style = MaterialTheme.typography.labelMedium)
                 Spacer(Modifier.height(7.dp))
-                Text("Visão geral das entregas", color = Color.White, style = MaterialTheme.typography.headlineMedium)
+                Text(if (dashboardArea == "levantamentos") "Dados dos levantamentos" else "Visão geral das entregas", color = Color.White, style = MaterialTheme.typography.headlineMedium)
                 Spacer(Modifier.height(7.dp))
-                Text("Acompanhe o ritmo e o histórico dos projetos ERP.", color = Color(0xFFD9DFF6), style = MaterialTheme.typography.bodyMedium)
+                Text(if (dashboardArea == "levantamentos") "Acompanhe os levantamentos pendentes e a coleta de dados." else "Acompanhe o ritmo, histórico e avaliações dos projetos ERP.", color = Color(0xFFD9DFF6), style = MaterialTheme.typography.bodyMedium)
             }
             Spacer(Modifier.height(18.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 MetricCard(
                     modifier = Modifier.weight(1f),
-                    icon = { Icon(Icons.Outlined.BusinessCenter, null, tint = Navy) },
-                    value = history.size.toString(),
-                    label = "Implantações"
+                    icon = { Icon(if (dashboardArea == "levantamentos") Icons.Outlined.Description else Icons.Outlined.BusinessCenter, null, tint = MaterialTheme.colorScheme.primary) },
+                    value = if (dashboardArea == "levantamentos") surveyPending.size.toString() else (reiPending.size + reiReports.size).toString(),
+                    label = if (dashboardArea == "levantamentos") "Pendentes" else "Implantações"
                 )
                 MetricCard(
                     modifier = Modifier.weight(1f),
                     icon = { Icon(Icons.Outlined.Timer, null, tint = Green) },
-                    value = averageDays?.let { String.format(Locale("pt", "BR"), "%.1f dias", it) } ?: "—",
-                    label = "Média de dias gastos"
+                    value = if (dashboardArea == "levantamentos") surveyCompleted.size.toString() else averageDays?.let { String.format(Locale("pt", "BR"), "%.1f dias", it) } ?: "—",
+                    label = if (dashboardArea == "levantamentos") "Concluídos" else "Média de dias gastos"
                 )
             }
-            if (!user.isSupervisor) {
+            if (dashboardArea != "levantamentos") {
                 Spacer(Modifier.height(12.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     MetricCard(
@@ -851,7 +1134,7 @@ private fun DashboardScreen(
                     )
                     MetricCard(
                         modifier = Modifier.weight(1f),
-                        icon = { Icon(Icons.Outlined.Description, null, tint = Navy) },
+                        icon = { Icon(Icons.Outlined.Description, null, tint = MaterialTheme.colorScheme.primary) },
                         value = evaluations.size.toString(),
                         label = "Avaliacoes"
                     )
@@ -860,23 +1143,32 @@ private fun DashboardScreen(
             Spacer(Modifier.height(12.dp))
             Surface(
                 Modifier.fillMaxWidth(),
-                color = Color.White,
+                color = appSurfaceColor(),
                 shape = RoundedCornerShape(18.dp),
-                border = androidx.compose.foundation.BorderStroke(1.dp, Border)
+                border = androidx.compose.foundation.BorderStroke(1.dp, appBorderColor())
             ) {
                 Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Box(Modifier.size(42.dp).clip(CircleShape).background(Color(0xFFEBF5E8)), contentAlignment = Alignment.Center) {
+                    Box(Modifier.size(42.dp).clip(CircleShape).background(MaterialTheme.colorScheme.secondary.copy(alpha = .16f)), contentAlignment = Alignment.Center) {
                         Icon(Icons.Rounded.CheckCircle, null, tint = Green)
                     }
                     Spacer(Modifier.width(12.dp))
                     Column {
-                        Text("Última implantação", style = MaterialTheme.typography.bodySmall, color = Color(0xFF778095))
-                        Text(lastDate, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                        Text(if (dashboardArea == "levantamentos") "Último levantamento" else "Última implantação", style = MaterialTheme.typography.bodySmall, color = appMutedColor())
+                        Text(
+                            if (dashboardArea == "levantamentos") {
+                                surveyCompleted.maxByOrNull { it.report.field("_surveyCompletedAt").toLongOrNull() ?: it.completedAt }?.let {
+                                    val completedAt = it.report.field("_surveyCompletedAt").toLongOrNull() ?: it.completedAt
+                                    SimpleDateFormat("dd/MM/yyyy", Locale("pt", "BR")).format(Date(completedAt))
+                                } ?: "—"
+                            } else lastDate,
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
                     }
                 }
             }
             Spacer(Modifier.height(18.dp))
-            Text("Acompanhamento", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = Color(0xFF1B2437))
+            Text("Acompanhamento", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = appTextColor())
             Spacer(Modifier.height(12.dp))
             dashboardGroups.chunked(2).forEach { rowGroups ->
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -897,15 +1189,16 @@ private fun DashboardScreen(
                 items = activeDashboardGroup.items,
                 emptyText = activeDashboardGroup.emptyText,
                 onOpenReport = { item ->
-                    if (!user.isSupervisor && item.stage() == "levantamento_pendente") onOpenSurvey(item)
+                    if (dashboardArea == "levantamentos" && item.stage() == "rei_pendente") onOpenSurvey(item)
+                    else if (!user.isSupervisor && item.stage() == "levantamento_pendente") onOpenSurvey(item)
                     else onOpenReport(item)
                 }
             )
             Spacer(Modifier.height(18.dp))
-            MonthlyDeliveriesChart(history)
+            MonthlyDeliveriesChart(if (dashboardArea == "levantamentos") allSurveys else reiPending + reiReports, if (dashboardArea == "levantamentos") "Levantamentos por mês" else "Implantações por mês")
             Spacer(Modifier.height(14.dp))
-            StatusDistributionChart(history)
-            if (!user.isSupervisor) {
+            StatusDistributionChart(if (dashboardArea == "levantamentos") allSurveys else reiReports, if (dashboardArea == "levantamentos") "Situação dos levantamentos" else "Situação das implantações")
+            if (dashboardArea != "levantamentos") {
                 Spacer(Modifier.height(14.dp))
                 LatestEvaluationsCard(evaluations.take(3), onOpenReport)
             }
@@ -948,13 +1241,13 @@ private fun HistorySection(
     onOpenReport: (ImplementationSummary) -> Unit
 ) {
     Row(verticalAlignment = Alignment.CenterVertically) {
-        Box(Modifier.size(34.dp).clip(RoundedCornerShape(11.dp)).background(Color(0xFFE8EDFF)), contentAlignment = Alignment.Center) {
-            Icon(Icons.Outlined.BusinessCenter, null, Modifier.size(19.dp), tint = Navy)
+        Box(Modifier.size(34.dp).clip(RoundedCornerShape(11.dp)).background(MaterialTheme.colorScheme.primaryContainer), contentAlignment = Alignment.Center) {
+            Icon(Icons.Outlined.BusinessCenter, null, Modifier.size(19.dp), tint = MaterialTheme.colorScheme.primary)
         }
         Spacer(Modifier.width(10.dp))
-        Text(title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = Color(0xFF1B2437))
+        Text(title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = appTextColor())
         Spacer(Modifier.weight(1f))
-        Text("$total total", style = MaterialTheme.typography.labelMedium, color = Color(0xFF778095))
+        Text("$total total", style = MaterialTheme.typography.labelMedium, color = appMutedColor())
     }
     Spacer(Modifier.height(12.dp))
     if (items.isEmpty()) {
@@ -1026,20 +1319,20 @@ private fun SurveyScreen(
     val currentSection = sections[currentIndex]
     val progress = (currentIndex + 1f) / sections.size
     Scaffold(
-        containerColor = PageBackground,
+        containerColor = appPageColor(),
         topBar = {
-            Surface(modifier = Modifier.statusBarsPadding(), color = Color.White, shadowElevation = 1.dp) {
+            Surface(modifier = Modifier.statusBarsPadding(), color = appSurfaceColor(), shadowElevation = 1.dp) {
                 Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
                     IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "Voltar") }
                     Column(Modifier.weight(1f)) {
-                        Text("Levantamento", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = Navy)
-                        Text(data.field("cliente").ifBlank { data.field("empresa").ifBlank { "Cliente não informado" } }, style = MaterialTheme.typography.bodySmall, color = Color(0xFF778095))
+                        Text("Levantamento", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                        Text(data.field("cliente").ifBlank { data.field("empresa").ifBlank { "Cliente não informado" } }, style = MaterialTheme.typography.bodySmall, color = appMutedColor())
                     }
                 }
             }
         },
         bottomBar = {
-            Surface(modifier = Modifier.navigationBarsPadding(), color = Color.White, shadowElevation = 12.dp) {
+            Surface(modifier = Modifier.navigationBarsPadding(), color = appSurfaceColor(), shadowElevation = 12.dp) {
                 Row(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 12.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     if (currentIndex > 0) {
                         OutlinedButton(
@@ -1062,7 +1355,7 @@ private fun SurveyScreen(
                             onClick = { surveyStep = (surveyStep + 1).coerceAtMost(sections.lastIndex) },
                             modifier = Modifier.weight(1f).height(52.dp),
                             shape = RoundedCornerShape(16.dp),
-                            colors = ButtonDefaults.buttonColors(containerColor = Navy)
+                            colors = ButtonDefaults.buttonColors(containerColor = Navy, contentColor = Color.White)
                         ) {
                             Text("Próximo")
                             Spacer(Modifier.width(7.dp))
@@ -1124,10 +1417,19 @@ private fun SurveyScreen(
 }
 
 @Composable
-private fun DashboardHeader(user: AuthUser, onLogout: () -> Unit) {
+private fun DashboardHeader(
+    user: AuthUser,
+    onLogout: () -> Unit,
+    onChangePassword: (String, String) -> Result<Unit>,
+    themeMode: ReiThemeMode,
+    onThemeModeChange: (ReiThemeMode) -> Unit
+) {
+    var showMenu by rememberSaveable { mutableStateOf(false) }
+    var showPasswordDialog by rememberSaveable { mutableStateOf(false) }
+    var showThemeDialog by rememberSaveable { mutableStateOf(false) }
     Surface(
         modifier = Modifier.statusBarsPadding(),
-        color = Color.White,
+        color = appSurfaceColor(),
         shadowElevation = 1.dp
     ) {
         Row(
@@ -1142,12 +1444,232 @@ private fun DashboardHeader(user: AuthUser, onLogout: () -> Unit) {
             )
             Spacer(Modifier.weight(1f))
             Column(horizontalAlignment = Alignment.End) {
-                Text("Dashboard", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.ExtraBold, color = Navy)
-                Text(user.fullName, style = MaterialTheme.typography.labelSmall, color = Color(0xFF747B8E), maxLines = 1)
+                Text("Dashboard", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.ExtraBold, color = MaterialTheme.colorScheme.primary)
+                Text(user.fullName, style = MaterialTheme.typography.labelSmall, color = appMutedColor(), maxLines = 1)
             }
             Spacer(Modifier.width(9.dp))
-            IconButton(onClick = onLogout, modifier = Modifier.size(42.dp).clip(CircleShape).background(Color(0xFFF0F2F7))) {
-                Icon(Icons.Outlined.Logout, contentDescription = "Sair", tint = Navy)
+            Box {
+                IconButton(
+                    onClick = { showMenu = true },
+                    modifier = Modifier.size(42.dp).clip(CircleShape).background(MaterialTheme.colorScheme.surfaceVariant)
+                ) {
+                    Icon(Icons.Outlined.Settings, contentDescription = "Configurações", tint = MaterialTheme.colorScheme.primary)
+                }
+                DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
+                    DropdownMenuItem(
+                        text = { Text("Tema: ${themeMode.label}") },
+                        leadingIcon = { Icon(Icons.Outlined.Settings, contentDescription = null) },
+                        onClick = {
+                            showMenu = false
+                            showThemeDialog = true
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Alterar minha senha") },
+                        leadingIcon = { Icon(Icons.Outlined.Lock, contentDescription = null) },
+                        onClick = {
+                            showMenu = false
+                            showPasswordDialog = true
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Sair do sistema") },
+                        leadingIcon = { Icon(Icons.Outlined.Logout, contentDescription = null) },
+                        onClick = {
+                            showMenu = false
+                            onLogout()
+                        }
+                    )
+                }
+            }
+        }
+    }
+    if (showPasswordDialog) {
+        ChangePasswordDialog(
+            onDismiss = { showPasswordDialog = false },
+            onChangePassword = onChangePassword
+        )
+    }
+    if (showThemeDialog) {
+        ThemeSettingsDialog(
+            selected = themeMode,
+            onDismiss = { showThemeDialog = false },
+            onSelect = {
+                onThemeModeChange(it)
+                showThemeDialog = false
+            }
+        )
+    }
+}
+
+@Composable
+private fun ThemeSettingsDialog(
+    selected: ReiThemeMode,
+    onDismiss: () -> Unit,
+    onSelect: (ReiThemeMode) -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Escolher tema", fontWeight = FontWeight.Bold) },
+        text = {
+            Column {
+                Text("Defina a aparência que será utilizada em todas as telas do aplicativo.", color = appMutedColor())
+                Spacer(Modifier.height(12.dp))
+                ReiThemeMode.entries.forEach { option ->
+                    Surface(
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp).clickable { onSelect(option) },
+                        shape = RoundedCornerShape(14.dp),
+                        color = if (selected == option) MaterialTheme.colorScheme.primaryContainer else appSurfaceColor(),
+                        border = androidx.compose.foundation.BorderStroke(
+                            1.dp,
+                            if (selected == option) MaterialTheme.colorScheme.primary else appBorderColor()
+                        )
+                    ) {
+                        Row(
+                            Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            RadioButton(selected = selected == option, onClick = { onSelect(option) })
+                            Spacer(Modifier.width(8.dp))
+                            Column {
+                                Text(option.label, fontWeight = FontWeight.Bold, color = appTextColor())
+                                Text(
+                                    when (option) {
+                                        ReiThemeMode.System -> "Acompanha a configuração do dispositivo"
+                                        ReiThemeMode.Light -> "Mantém o aplicativo com fundo claro"
+                                        ReiThemeMode.Dark -> "Reduz o brilho com cores escuras"
+                                    },
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = appMutedColor()
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancelar") } }
+    )
+}
+
+@Composable
+private fun ChangePasswordDialog(
+    onDismiss: () -> Unit,
+    onChangePassword: (String, String) -> Result<Unit>
+) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val scope = rememberCoroutineScope()
+    var currentPassword by rememberSaveable { mutableStateOf("") }
+    var newPassword by rememberSaveable { mutableStateOf("") }
+    var confirmation by rememberSaveable { mutableStateOf("") }
+    var error by rememberSaveable { mutableStateOf("") }
+    var loading by rememberSaveable { mutableStateOf(false) }
+
+    AlertDialog(
+        onDismissRequest = { if (!loading) onDismiss() },
+        title = { Text("Alterar minha senha", fontWeight = FontWeight.Bold) },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                Text("Informe a senha atual e escolha uma nova senha com pelo menos 8 caracteres.", color = appMutedColor())
+                Spacer(Modifier.height(12.dp))
+                OutlinedTextField(
+                    value = currentPassword,
+                    onValueChange = { currentPassword = it; error = "" },
+                    label = { Text("Senha atual") },
+                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(Modifier.height(10.dp))
+                OutlinedTextField(
+                    value = newPassword,
+                    onValueChange = { newPassword = it; error = "" },
+                    label = { Text("Nova senha") },
+                    supportingText = { Text("Mínimo de 8 caracteres") },
+                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(Modifier.height(4.dp))
+                OutlinedTextField(
+                    value = confirmation,
+                    onValueChange = { confirmation = it; error = "" },
+                    label = { Text("Confirmar nova senha") },
+                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                    singleLine = true,
+                    isError = error.isNotBlank(),
+                    modifier = Modifier.fillMaxWidth()
+                )
+                if (error.isNotBlank()) {
+                    Spacer(Modifier.height(6.dp))
+                    Text(error, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                enabled = !loading,
+                onClick = {
+                    when {
+                        currentPassword.isBlank() -> error = "Informe a senha atual."
+                        newPassword.length < 8 -> error = "A nova senha deve ter ao menos 8 caracteres."
+                        newPassword != confirmation -> error = "A confirmação da nova senha não confere."
+                        else -> {
+                            loading = true
+                            scope.launch {
+                                val result = withContext(Dispatchers.IO) { onChangePassword(currentPassword, newPassword) }
+                                loading = false
+                                result.onSuccess {
+                                    Toast.makeText(context, "Senha alterada com sucesso", Toast.LENGTH_LONG).show()
+                                    onDismiss()
+                                }.onFailure { error = it.message ?: "Não foi possível alterar a senha." }
+                            }
+                        }
+                    }
+                }
+            ) { Text(if (loading) "Alterando..." else "Alterar senha") }
+        },
+        dismissButton = {
+            TextButton(enabled = !loading, onClick = onDismiss) { Text("Cancelar") }
+        }
+    )
+}
+
+@Composable
+private fun DashboardAreaButton(
+    modifier: Modifier = Modifier,
+    title: String,
+    subtitle: String,
+    value: String,
+    icon: String,
+    onClick: () -> Unit
+) {
+    Surface(
+        modifier = modifier.heightIn(min = 96.dp).clickable(onClick = onClick),
+        shape = RoundedCornerShape(20.dp),
+        color = appSurfaceColor(),
+        border = androidx.compose.foundation.BorderStroke(1.dp, appBorderColor())
+    ) {
+        Row(Modifier.padding(horizontal = 14.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.size(42.dp).clip(RoundedCornerShape(14.dp)).background(MaterialTheme.colorScheme.surfaceVariant), contentAlignment = Alignment.Center) {
+                when (icon) {
+                    "briefcase" -> Icon(Icons.Outlined.BusinessCenter, null, tint = MaterialTheme.colorScheme.primary)
+                    else -> Icon(Icons.Outlined.Description, null, tint = MaterialTheme.colorScheme.primary)
+                }
+            }
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.ExtraBold, color = appTextColor())
+                Spacer(Modifier.height(3.dp))
+                Text(subtitle, style = MaterialTheme.typography.bodySmall, color = appMutedColor())
+            }
+            Spacer(Modifier.width(8.dp))
+            Box(Modifier.size(42.dp).clip(RoundedCornerShape(14.dp)).background(Navy), contentAlignment = Alignment.Center) {
+                Text(value, color = Color.White, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.ExtraBold)
             }
         }
     }
@@ -1162,16 +1684,16 @@ private fun MetricCard(
 ) {
     Surface(
         modifier = modifier.height(92.dp),
-        color = Color.White,
+        color = appSurfaceColor(),
         shape = RoundedCornerShape(20.dp),
-        border = androidx.compose.foundation.BorderStroke(1.dp, Border)
+        border = androidx.compose.foundation.BorderStroke(1.dp, appBorderColor())
     ) {
         Row(Modifier.fillMaxSize().padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.size(40.dp).clip(CircleShape).background(Color(0xFFF0F3FB)), contentAlignment = Alignment.Center) { icon() }
+            Box(Modifier.size(40.dp).clip(CircleShape).background(MaterialTheme.colorScheme.surfaceVariant), contentAlignment = Alignment.Center) { icon() }
             Spacer(Modifier.width(12.dp))
             Column {
-                Text(label, style = MaterialTheme.typography.bodySmall, color = Color(0xFF778095))
-                Text(value, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.ExtraBold, color = Color(0xFF1B2437))
+                Text(label, style = MaterialTheme.typography.bodySmall, color = appMutedColor())
+                Text(value, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.ExtraBold, color = appTextColor())
             }
         }
     }
@@ -1184,37 +1706,37 @@ private fun WorkflowSummaryCard(
     active: Boolean,
     onClick: () -> Unit
 ) {
-    val borderColor = if (active) Navy else Border
+    val borderColor = if (active) MaterialTheme.colorScheme.primary else appBorderColor()
     Surface(
-        modifier = modifier.height(108.dp).clickable(onClick = onClick),
-        color = Color.White,
+        modifier = modifier.heightIn(min = 148.dp).clickable(onClick = onClick),
+        color = appSurfaceColor(),
         shape = RoundedCornerShape(20.dp),
         border = androidx.compose.foundation.BorderStroke(if (active) 2.dp else 1.dp, borderColor)
     ) {
         Row(Modifier.fillMaxSize().padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(
-                Modifier.size(40.dp).clip(CircleShape).background(if (active) Navy else Color(0xFFF0F3FB)),
+                Modifier.size(40.dp).clip(CircleShape).background(if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant),
                 contentAlignment = Alignment.Center
             ) {
                 when (group.icon) {
-                    "timer" -> Icon(Icons.Outlined.Timer, null, tint = if (active) Color.White else Navy)
-                    "calendar" -> Icon(Icons.Outlined.CalendarMonth, null, tint = if (active) Color.White else Navy)
-                    "briefcase" -> Icon(Icons.Outlined.BusinessCenter, null, tint = if (active) Color.White else Navy)
-                    else -> Icon(Icons.Outlined.Description, null, tint = if (active) Color.White else Navy)
+                    "timer" -> Icon(Icons.Outlined.Timer, null, tint = if (active) Color.White else MaterialTheme.colorScheme.primary)
+                    "calendar" -> Icon(Icons.Outlined.CalendarMonth, null, tint = if (active) Color.White else MaterialTheme.colorScheme.primary)
+                    "briefcase" -> Icon(Icons.Outlined.BusinessCenter, null, tint = if (active) Color.White else MaterialTheme.colorScheme.primary)
+                    else -> Icon(Icons.Outlined.Description, null, tint = if (active) Color.White else MaterialTheme.colorScheme.primary)
                 }
             }
             Spacer(Modifier.width(12.dp))
             Column {
-                Text(group.title, style = MaterialTheme.typography.bodySmall, color = Color(0xFF778095), maxLines = 2)
-                Text(group.value.toString(), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.ExtraBold, color = Color(0xFF1B2437))
-                Text(group.subtitle, style = MaterialTheme.typography.labelSmall, color = Color(0xFF778095), maxLines = 2)
+                Text(group.title, style = MaterialTheme.typography.bodySmall, color = appMutedColor(), maxLines = 2)
+                Text(group.value.toString(), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.ExtraBold, color = appTextColor())
+                Text(group.subtitle, style = MaterialTheme.typography.labelSmall, color = appMutedColor(), maxLines = 3)
             }
         }
     }
 }
 
 @Composable
-private fun MonthlyDeliveriesChart(history: List<ImplementationSummary>) {
+private fun MonthlyDeliveriesChart(history: List<ImplementationSummary>, title: String = "Entregas por mês") {
     val current = YearMonth.now()
     val months = (5 downTo 0).map { current.minusMonths(it.toLong()) }
     val counts = months.map { month ->
@@ -1227,18 +1749,18 @@ private fun MonthlyDeliveriesChart(history: List<ImplementationSummary>) {
     Surface(
         Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(20.dp),
-        color = Color.White,
-        border = androidx.compose.foundation.BorderStroke(1.dp, Border)
+        color = appSurfaceColor(),
+        border = androidx.compose.foundation.BorderStroke(1.dp, appBorderColor())
     ) {
         Column(Modifier.padding(18.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(Modifier.size(34.dp).clip(RoundedCornerShape(11.dp)).background(Color(0xFFE8EDFF)), contentAlignment = Alignment.Center) {
-                    Icon(Icons.Outlined.Timer, null, Modifier.size(19.dp), tint = Navy)
+                Box(Modifier.size(34.dp).clip(RoundedCornerShape(11.dp)).background(MaterialTheme.colorScheme.primaryContainer), contentAlignment = Alignment.Center) {
+                    Icon(Icons.Outlined.Timer, null, Modifier.size(19.dp), tint = MaterialTheme.colorScheme.primary)
                 }
                 Spacer(Modifier.width(10.dp))
                 Column {
-                    Text("Entregas por mês", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                    Text("Últimos seis meses", style = MaterialTheme.typography.bodySmall, color = Color(0xFF778095))
+                    Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                    Text("Últimos seis meses", style = MaterialTheme.typography.bodySmall, color = appMutedColor())
                 }
             }
             Spacer(Modifier.height(18.dp))
@@ -1246,18 +1768,18 @@ private fun MonthlyDeliveriesChart(history: List<ImplementationSummary>) {
                 months.forEachIndexed { index, month ->
                     val count = counts[index]
                     Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text(count.toString(), style = MaterialTheme.typography.labelMedium, color = Navy, fontWeight = FontWeight.Bold)
+                        Text(count.toString(), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
                         Spacer(Modifier.height(5.dp))
                         Box(Modifier.height(92.dp).fillMaxWidth(), contentAlignment = Alignment.BottomCenter) {
                             Box(
                                 Modifier.width(24.dp)
                                     .height(if (count == 0) 5.dp else (18 + (74f * count / max)).dp)
                                     .clip(RoundedCornerShape(topStart = 7.dp, topEnd = 7.dp))
-                                    .background(if (count == 0) Color(0xFFE4E7EF) else Navy)
+                                    .background(if (count == 0) MaterialTheme.colorScheme.surfaceVariant else Navy)
                             )
                         }
                         Spacer(Modifier.height(7.dp))
-                        Text(month.format(formatter).replaceFirstChar { it.uppercase() }, style = MaterialTheme.typography.labelMedium, color = Color(0xFF778095))
+                        Text(month.format(formatter).replaceFirstChar { it.uppercase() }, style = MaterialTheme.typography.labelMedium, color = appMutedColor())
                     }
                 }
             }
@@ -1266,11 +1788,12 @@ private fun MonthlyDeliveriesChart(history: List<ImplementationSummary>) {
 }
 
 @Composable
-private fun StatusDistributionChart(history: List<ImplementationSummary>) {
+private fun StatusDistributionChart(history: List<ImplementationSummary>, title: String = "Situação das entregas") {
     val concluded = history.count { it.deliveryStatus.startsWith("Concluído") }
     val notConcluded = history.count { it.deliveryStatus == "Não concluído" }
     val unspecified = history.size - concluded - notConcluded
     val total = history.size
+    val emptyTrackColor = appBorderColor()
     val segments = listOf(
         Triple("Concluídas", concluded, Green),
         Triple("Não concluídas", notConcluded, Color(0xFFE39A32)),
@@ -1279,18 +1802,18 @@ private fun StatusDistributionChart(history: List<ImplementationSummary>) {
     Surface(
         Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(20.dp),
-        color = Color.White,
-        border = androidx.compose.foundation.BorderStroke(1.dp, Border)
+        color = appSurfaceColor(),
+        border = androidx.compose.foundation.BorderStroke(1.dp, appBorderColor())
     ) {
         Column(Modifier.padding(18.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(Modifier.size(34.dp).clip(RoundedCornerShape(11.dp)).background(Color(0xFFEBF5E8)), contentAlignment = Alignment.Center) {
+                Box(Modifier.size(34.dp).clip(RoundedCornerShape(11.dp)).background(MaterialTheme.colorScheme.secondary.copy(alpha = .16f)), contentAlignment = Alignment.Center) {
                     Icon(Icons.Rounded.CheckCircle, null, Modifier.size(19.dp), tint = Green)
                 }
                 Spacer(Modifier.width(10.dp))
                 Column {
-                    Text("Situação das entregas", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                    Text("Distribuição dos relatórios finalizados", style = MaterialTheme.typography.bodySmall, color = Color(0xFF778095))
+                    Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                    Text("Distribuição dos relatórios finalizados", style = MaterialTheme.typography.bodySmall, color = appMutedColor())
                 }
             }
             Spacer(Modifier.height(18.dp))
@@ -1298,7 +1821,7 @@ private fun StatusDistributionChart(history: List<ImplementationSummary>) {
                 Box(Modifier.size(132.dp), contentAlignment = Alignment.Center) {
                     Canvas(Modifier.fillMaxSize().padding(8.dp)) {
                         if (total == 0) {
-                            drawArc(Color(0xFFE4E7EF), -90f, 360f, false, style = Stroke(width = 22f))
+                            drawArc(emptyTrackColor, -90f, 360f, false, style = Stroke(width = 22f))
                         } else {
                             var start = -90f
                             segments.forEach { (_, count, color) ->
@@ -1312,7 +1835,7 @@ private fun StatusDistributionChart(history: List<ImplementationSummary>) {
                     }
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Text(total.toString(), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.ExtraBold)
-                        Text("total", style = MaterialTheme.typography.labelMedium, color = Color(0xFF778095))
+                        Text("total", style = MaterialTheme.typography.labelMedium, color = appMutedColor())
                     }
                 }
                 Spacer(Modifier.width(20.dp))
@@ -1321,7 +1844,7 @@ private fun StatusDistributionChart(history: List<ImplementationSummary>) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Box(Modifier.size(10.dp).clip(CircleShape).background(color))
                             Spacer(Modifier.width(8.dp))
-                            Text(label, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, color = Color(0xFF596174))
+                            Text(label, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, color = appMutedColor())
                             Text(count.toString(), fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodySmall)
                         }
                     }
@@ -1392,29 +1915,29 @@ private fun LatestEvaluationsCard(
     Surface(
         Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(20.dp),
-        color = Color.White,
-        border = androidx.compose.foundation.BorderStroke(1.dp, Border)
+        color = appSurfaceColor(),
+        border = androidx.compose.foundation.BorderStroke(1.dp, appBorderColor())
     ) {
         Column(Modifier.padding(18.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("Ultimas avaliacoes", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = Color(0xFF1B2437))
+                Text("Ultimas avaliacoes", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = appTextColor())
                 Spacer(Modifier.weight(1f))
-                Text("${evaluations.size} recentes", style = MaterialTheme.typography.labelMedium, color = Color(0xFF778095))
+                Text("${evaluations.size} recentes", style = MaterialTheme.typography.labelMedium, color = appMutedColor())
             }
             Spacer(Modifier.height(5.dp))
-            Text("Feedbacks da supervisao sobre suas implantacoes entregues.", style = MaterialTheme.typography.bodySmall, color = Color(0xFF778095))
+            Text("Feedbacks da supervisao sobre suas implantacoes entregues.", style = MaterialTheme.typography.bodySmall, color = appMutedColor())
             Spacer(Modifier.height(13.dp))
             if (evaluations.isEmpty()) {
                 Box(
-                    Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(Color(0xFFF5F7FB)).padding(16.dp),
+                    Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(MaterialTheme.colorScheme.surfaceVariant).padding(16.dp),
                     contentAlignment = Alignment.Center
                 ) {
-                    Text("Nenhuma avaliacao recebida ainda.", style = MaterialTheme.typography.bodySmall, color = Color(0xFF778095))
+                    Text("Nenhuma avaliacao recebida ainda.", style = MaterialTheme.typography.bodySmall, color = appMutedColor())
                 }
             } else {
                 evaluations.forEachIndexed { index, item ->
                     EvaluationRow(item) { onOpenReport(item) }
-                    if (index < evaluations.lastIndex) HorizontalDivider(color = Border, modifier = Modifier.padding(vertical = 10.dp))
+                    if (index < evaluations.lastIndex) HorizontalDivider(color = appBorderColor(), modifier = Modifier.padding(vertical = 10.dp))
                 }
             }
         }
@@ -1432,18 +1955,18 @@ private fun EvaluationRow(item: ImplementationSummary, onClick: () -> Unit) {
         Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).clickable(onClick = onClick).padding(vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Box(Modifier.size(48.dp).clip(CircleShape).background(Color(0xFFEBF5E8)), contentAlignment = Alignment.Center) {
-            Text(score?.let { String.format(Locale("pt", "BR"), "%.1f", it) } ?: "-", color = Color(0xFF3E7034), fontWeight = FontWeight.ExtraBold)
+        Box(Modifier.size(48.dp).clip(CircleShape).background(MaterialTheme.colorScheme.secondary.copy(alpha = .16f)), contentAlignment = Alignment.Center) {
+            Text(score?.let { String.format(Locale("pt", "BR"), "%.1f", it) } ?: "-", color = MaterialTheme.colorScheme.secondary, fontWeight = FontWeight.ExtraBold)
         }
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
-            Text(item.client, fontWeight = FontWeight.Bold, color = Color(0xFF252D40), maxLines = 1)
-            Text("Avaliado em $date", style = MaterialTheme.typography.bodySmall, color = Color(0xFF778095))
+            Text(item.client, fontWeight = FontWeight.Bold, color = appTextColor(), maxLines = 1)
+            Text("Avaliado em $date", style = MaterialTheme.typography.bodySmall, color = appMutedColor())
             if (item.report.rating.isNotBlank()) {
-                Text(item.report.rating, style = MaterialTheme.typography.bodySmall, color = Color(0xFF596174), maxLines = 2)
+                Text(item.report.rating, style = MaterialTheme.typography.bodySmall, color = appMutedColor(), maxLines = 2)
             }
         }
-        Icon(Icons.AutoMirrored.Rounded.ArrowForward, contentDescription = "Abrir avaliacao", tint = Color(0xFF778095))
+        Icon(Icons.AutoMirrored.Rounded.ArrowForward, contentDescription = "Abrir avaliacao", tint = appMutedColor())
     }
 }
 
@@ -1452,17 +1975,17 @@ private fun EmptyHistoryCard(message: String = "Nenhuma implantação registrada
     Surface(
         Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(20.dp),
-        color = Color.White,
-        border = androidx.compose.foundation.BorderStroke(1.dp, Border)
+        color = appSurfaceColor(),
+        border = androidx.compose.foundation.BorderStroke(1.dp, appBorderColor())
     ) {
         Column(Modifier.fillMaxWidth().padding(28.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-            Box(Modifier.size(52.dp).clip(CircleShape).background(Color(0xFFF0F3FB)), contentAlignment = Alignment.Center) {
-                Icon(Icons.Outlined.BusinessCenter, null, tint = Navy)
+            Box(Modifier.size(52.dp).clip(CircleShape).background(MaterialTheme.colorScheme.surfaceVariant), contentAlignment = Alignment.Center) {
+                Icon(Icons.Outlined.BusinessCenter, null, tint = MaterialTheme.colorScheme.primary)
             }
             Spacer(Modifier.height(12.dp))
             Text(message, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(4.dp))
-            Text("Gere o primeiro relatório para alimentar suas métricas.", style = MaterialTheme.typography.bodySmall, color = Color(0xFF778095))
+            Text("Gere o primeiro relatório para alimentar suas métricas.", style = MaterialTheme.typography.bodySmall, color = appMutedColor())
         }
     }
 }
@@ -1473,24 +1996,24 @@ private fun HistoryCard(item: ImplementationSummary, onClick: () -> Unit) {
     Surface(
         Modifier.fillMaxWidth().clickable(onClick = onClick),
         shape = RoundedCornerShape(18.dp),
-        color = Color.White,
-        border = androidx.compose.foundation.BorderStroke(1.dp, Border)
+        color = appSurfaceColor(),
+        border = androidx.compose.foundation.BorderStroke(1.dp, appBorderColor())
     ) {
         Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.size(46.dp).clip(RoundedCornerShape(14.dp)).background(Color(0xFFE8EDFF)), contentAlignment = Alignment.Center) {
-                Icon(Icons.Outlined.BusinessCenter, null, tint = Navy)
+            Box(Modifier.size(46.dp).clip(RoundedCornerShape(14.dp)).background(MaterialTheme.colorScheme.primaryContainer), contentAlignment = Alignment.Center) {
+                Icon(Icons.Outlined.BusinessCenter, null, tint = MaterialTheme.colorScheme.primary)
             }
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
-                Text(item.client, fontWeight = FontWeight.Bold, color = Color(0xFF252D40), maxLines = 1)
-                Text(date, style = MaterialTheme.typography.bodySmall, color = Color(0xFF778095))
-                if (item.consultant.isNotBlank()) Text(item.consultant, style = MaterialTheme.typography.bodySmall, color = Color(0xFF778095), maxLines = 1)
+                Text(item.client, fontWeight = FontWeight.Bold, color = appTextColor(), maxLines = 1)
+                Text(date, style = MaterialTheme.typography.bodySmall, color = appMutedColor())
+                if (item.consultant.isNotBlank()) Text(item.consultant, style = MaterialTheme.typography.bodySmall, color = appMutedColor(), maxLines = 1)
                 item.report.field("_assignedImplantadorName").ifBlank { item.report.field("_assignedImplantadorUsername") }.takeIf { it.isNotBlank() }?.let {
-                    Text("Responsável: $it", style = MaterialTheme.typography.bodySmall, color = Color(0xFF778095), maxLines = 1)
+                    Text("Responsável: $it", style = MaterialTheme.typography.bodySmall, color = appMutedColor(), maxLines = 1)
                 }
             }
-            Surface(color = Color(0xFFEBF5E8), shape = RoundedCornerShape(50)) {
-                Text("${item.checkedItems} itens", Modifier.padding(horizontal = 9.dp, vertical = 5.dp), style = MaterialTheme.typography.labelMedium, color = Color(0xFF3E7034))
+            Surface(color = MaterialTheme.colorScheme.secondary.copy(alpha = .16f), shape = RoundedCornerShape(50)) {
+                Text("${item.checkedItems} itens", Modifier.padding(horizontal = 9.dp, vertical = 5.dp), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.secondary)
             }
         }
     }
@@ -1499,6 +2022,7 @@ private fun HistoryCard(item: ImplementationSummary, onClick: () -> Unit) {
 @Composable
 private fun ReportViewerScreen(
     item: ImplementationSummary,
+    surveyMode: Boolean,
     onBack: () -> Unit,
     onEdit: (() -> Unit)?,
     onEvaluate: ((String, String, Set<String>) -> Unit)?,
@@ -1517,11 +2041,11 @@ private fun ReportViewerScreen(
         )
     }
     Scaffold(
-        containerColor = PageBackground,
+        containerColor = appPageColor(),
         topBar = {
             Surface(
                 modifier = Modifier.statusBarsPadding(),
-                color = Color.White,
+                color = appSurfaceColor(),
                 shadowElevation = 1.dp
             ) {
                 Row(
@@ -1532,10 +2056,10 @@ private fun ReportViewerScreen(
                     Spacer(Modifier.width(5.dp))
                     Column(Modifier.weight(1f)) {
                         Text(item.client, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, maxLines = 1)
-                        Text("Relatório concluído", style = MaterialTheme.typography.bodySmall, color = Color(0xFF778095))
+                        Text(if (surveyMode) "Levantamento concluído" else "Relatório concluído", style = MaterialTheme.typography.bodySmall, color = appMutedColor())
                     }
-                    Surface(color = Color(0xFFEBF5E8), shape = RoundedCornerShape(50)) {
-                        Text("Entregue", Modifier.padding(horizontal = 10.dp, vertical = 6.dp), style = MaterialTheme.typography.labelMedium, color = Color(0xFF3E7034))
+                    Surface(color = MaterialTheme.colorScheme.secondary.copy(alpha = .16f), shape = RoundedCornerShape(50)) {
+                        Text(if (surveyMode) "Concluído" else "Entregue", Modifier.padding(horizontal = 10.dp, vertical = 6.dp), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.secondary)
                     }
                 }
             }
@@ -1543,7 +2067,7 @@ private fun ReportViewerScreen(
         bottomBar = {
             Surface(
                 modifier = Modifier.navigationBarsPadding(),
-                color = Color.White,
+                color = appSurfaceColor(),
                 shadowElevation = 12.dp
             ) {
                 Column(
@@ -1583,11 +2107,11 @@ private fun ReportViewerScreen(
                             onClick = onReprint,
                             modifier = Modifier.weight(1.45f).height(54.dp),
                             shape = RoundedCornerShape(17.dp),
-                            colors = ButtonDefaults.buttonColors(containerColor = Navy)
+                            colors = ButtonDefaults.buttonColors(containerColor = Navy, contentColor = Color.White)
                         ) {
                             Icon(Icons.Outlined.PictureAsPdf, null)
                             Spacer(Modifier.width(7.dp))
-                            Text("Segunda via", fontWeight = FontWeight.Bold)
+                            Text(if (surveyMode) "Imprimir relatório" else "Segunda via", fontWeight = FontWeight.Bold)
                         }
                     }
                     }
@@ -1603,7 +2127,7 @@ private fun ReportViewerScreen(
                 Modifier.fillMaxWidth().clip(RoundedCornerShape(22.dp))
                     .background(Brush.linearGradient(listOf(NavyDark, Navy))).padding(20.dp)
             ) {
-                Text("RELATÓRIO DE IMPLANTAÇÃO", color = Color(0xFFBFC9F5), style = MaterialTheme.typography.labelMedium)
+                Text(if (surveyMode) "RELATÓRIO DE LEVANTAMENTO" else "RELATÓRIO DE IMPLANTAÇÃO", color = Color(0xFFBFC9F5), style = MaterialTheme.typography.labelMedium)
                 Spacer(Modifier.height(5.dp))
                 Text(item.client, color = Color.White, style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(6.dp))
@@ -1614,6 +2138,9 @@ private fun ReportViewerScreen(
                 )
             }
             Spacer(Modifier.height(14.dp))
+            if (surveyMode) {
+                SurveyCompletedViewer(data)
+            } else {
             ViewerSection("Identificação") {
                 ViewerValue("Cliente / Projeto", data.field("cliente"))
                 ViewerValue("Consultor", data.field("consultor"))
@@ -1625,9 +2152,13 @@ private fun ReportViewerScreen(
             }
             ViewerSelectedChecks("Módulos contratados", ReportSchema.contractedModules.filter { ReportSchema.contractedKey(it) in data.checks })
             ViewerChecklistScope("Preenchimento técnico", "tecnico", ReportSchema.technical, data)
+            ViewerDynamicFields("Campos técnicos personalizados", "tecnico", data)
             ViewerChecklistScope("Módulo Estoque", "estoque", ReportSchema.stock, data)
+            ViewerDynamicFields("Campos de estoque personalizados", "estoque", data)
             ViewerChecklistScope("Módulo Financeiro", "financeiro", ReportSchema.finance, data)
+            ViewerDynamicFields("Campos financeiros personalizados", "financeiro", data)
             ViewerChecklistScope("Fiscal e relatórios", "fiscal", ReportSchema.fiscalReports, data)
+            ViewerDynamicFields("Campos fiscais personalizados", "fiscal", data)
             ViewerSection("Entrega") {
                 ViewerValue("Serviços executados", data.field("servicosExecutados"))
                 ViewerValue("Posicionamento", data.deliveryStatus)
@@ -1646,7 +2177,7 @@ private fun ReportViewerScreen(
                             Row(Modifier.padding(vertical = 5.dp), verticalAlignment = Alignment.CenterVertically) {
                                 Icon(Icons.Rounded.CheckCircle, null, Modifier.size(20.dp), tint = Green)
                                 Spacer(Modifier.width(9.dp))
-                                Text(item, style = MaterialTheme.typography.bodyMedium, color = Color(0xFF3D4558))
+                                Text(item, style = MaterialTheme.typography.bodyMedium, color = appTextColor())
                             }
                         }
                     }
@@ -1667,6 +2198,7 @@ private fun ReportViewerScreen(
                         Spacer(Modifier.height(9.dp))
                     }
                 }
+            }
             }
             Spacer(Modifier.height(12.dp))
         }
@@ -1697,14 +2229,14 @@ private fun SupervisorEvaluationDialog(
                 Text(
                     "Checklist exclusivo do supervisor para validar a implantação entregue.",
                     style = MaterialTheme.typography.bodySmall,
-                    color = Color(0xFF778095)
+                    color = appMutedColor()
                 )
                 Spacer(Modifier.height(12.dp))
                 Surface(
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(16.dp),
-                    color = Color(0xFFF7F8FB),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, Border)
+                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    border = androidx.compose.foundation.BorderStroke(1.dp, appBorderColor())
                 ) {
                     Column(Modifier.padding(horizontal = 14.dp, vertical = 12.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1712,14 +2244,14 @@ private fun SupervisorEvaluationDialog(
                                 "Nota da supervisão",
                                 style = MaterialTheme.typography.labelLarge,
                                 fontWeight = FontWeight.Bold,
-                                color = Color(0xFF596174)
+                                color = appMutedColor()
                             )
                             Spacer(Modifier.weight(1f))
                             Text(
                                 String.format(Locale("pt", "BR"), "%.1f/10", score),
                                 style = MaterialTheme.typography.titleMedium,
                                 fontWeight = FontWeight.ExtraBold,
-                                color = Navy
+                                color = MaterialTheme.colorScheme.primary
                             )
                         }
                         Slider(
@@ -1742,7 +2274,7 @@ private fun SupervisorEvaluationDialog(
                 )
                 Spacer(Modifier.height(16.dp))
                 ReportSchema.supervision.forEach { group ->
-                    Text(group.title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, color = Navy)
+                    Text(group.title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
                     Spacer(Modifier.height(5.dp))
                     group.items.forEach { item ->
                         val key = ReportSchema.key("supervisao", group.title, item)
@@ -1762,7 +2294,7 @@ private fun SupervisorEvaluationDialog(
                                 },
                                 colors = CheckboxDefaults.colors(checkedColor = Green, uncheckedColor = Color(0xFF8A91A2))
                             )
-                            Text(item, style = MaterialTheme.typography.bodyMedium, color = Color(0xFF3D4558))
+                            Text(item, style = MaterialTheme.typography.bodyMedium, color = appTextColor())
                         }
                     }
                     Spacer(Modifier.height(10.dp))
@@ -1784,8 +2316,8 @@ private fun ViewerSection(title: String, content: @Composable () -> Unit) {
     Card(
         Modifier.fillMaxWidth().padding(bottom = 14.dp),
         shape = RoundedCornerShape(20.dp),
-        colors = CardDefaults.cardColors(containerColor = Color.White),
-        border = androidx.compose.foundation.BorderStroke(1.dp, Border)
+        colors = CardDefaults.cardColors(containerColor = appSurfaceColor()),
+        border = androidx.compose.foundation.BorderStroke(1.dp, appBorderColor())
     ) {
         Column(Modifier.padding(18.dp)) {
             Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
@@ -1798,10 +2330,10 @@ private fun ViewerSection(title: String, content: @Composable () -> Unit) {
 @Composable
 private fun ViewerValue(label: String, value: String, divider: Boolean = true) {
     Column(Modifier.fillMaxWidth().padding(vertical = 5.dp)) {
-        Text(label, style = MaterialTheme.typography.bodySmall, color = Color(0xFF778095))
-        Text(value.ifBlank { "Não informado" }, style = MaterialTheme.typography.bodyMedium, color = Color(0xFF30384B))
+        Text(label, style = MaterialTheme.typography.bodySmall, color = appMutedColor())
+        Text(value.ifBlank { "Não informado" }, style = MaterialTheme.typography.bodyMedium, color = appTextColor())
     }
-    if (divider) HorizontalDivider(color = Border)
+    if (divider) HorizontalDivider(color = appBorderColor())
 }
 
 @Composable
@@ -1814,12 +2346,12 @@ private fun ViewerChecklistScope(title: String, scope: String, groups: List<Chec
 private fun ViewerSelectedChecks(title: String, items: List<String>) {
     ViewerSection(title) {
         if (items.isEmpty()) {
-            Text("Nenhum item marcado", style = MaterialTheme.typography.bodySmall, color = Color(0xFF778095))
+            Text("Nenhum item marcado", style = MaterialTheme.typography.bodySmall, color = appMutedColor())
         } else items.forEach { item ->
             Row(Modifier.padding(vertical = 5.dp), verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Rounded.CheckCircle, null, Modifier.size(20.dp), tint = Green)
                 Spacer(Modifier.width(9.dp))
-                Text(item, style = MaterialTheme.typography.bodyMedium, color = Color(0xFF3D4558))
+                Text(item, style = MaterialTheme.typography.bodyMedium, color = appTextColor())
             }
         }
     }
@@ -1827,11 +2359,11 @@ private fun ViewerSelectedChecks(title: String, items: List<String>) {
 
 @Composable
 private fun ViewerImage(label: String, uri: String) {
-    Text(label, style = MaterialTheme.typography.bodySmall, color = Color(0xFF778095))
+    Text(label, style = MaterialTheme.typography.bodySmall, color = appMutedColor())
     Spacer(Modifier.height(6.dp))
     Box(
         Modifier.fillMaxWidth().height(132.dp).clip(RoundedCornerShape(14.dp))
-            .background(Color.White).border(1.dp, Border, RoundedCornerShape(14.dp))
+            .background(appSurfaceColor()).border(1.dp, appBorderColor(), RoundedCornerShape(14.dp))
     ) { AttachmentThumbnail(uri) }
     Spacer(Modifier.height(12.dp))
 }
@@ -1839,27 +2371,28 @@ private fun ViewerImage(label: String, uri: String) {
 @Composable
 private fun ViewerAttachment(item: ReportAttachment) {
     Row(
-        Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(Color(0xFFF5F7FB))
-            .border(1.dp, Border, RoundedCornerShape(14.dp)).padding(9.dp),
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(MaterialTheme.colorScheme.surfaceVariant)
+            .border(1.dp, appBorderColor(), RoundedCornerShape(14.dp)).padding(9.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Box(Modifier.size(54.dp).clip(RoundedCornerShape(10.dp)).background(Color(0xFFE8ECF5)), contentAlignment = Alignment.Center) {
+        Box(Modifier.size(54.dp).clip(RoundedCornerShape(10.dp)).background(MaterialTheme.colorScheme.primaryContainer), contentAlignment = Alignment.Center) {
             if (item.mimeType.startsWith("image/")) AttachmentThumbnail(item.uri)
-            else Icon(Icons.Outlined.Description, null, tint = Navy)
+            else Icon(Icons.Outlined.Description, null, tint = MaterialTheme.colorScheme.primary)
         }
         Spacer(Modifier.width(11.dp))
         Column {
             Text(item.name, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium, maxLines = 2)
-            Text(if (item.mimeType.startsWith("image/")) "Imagem" else "Documento", style = MaterialTheme.typography.bodySmall, color = Color(0xFF778095))
+            Text(if (item.mimeType.startsWith("image/")) "Imagem" else "Documento", style = MaterialTheme.typography.bodySmall, color = appMutedColor())
         }
     }
 }
 
 @Composable
 private fun ReiTopBar(onHome: (() -> Unit)?, onNewReport: () -> Unit, onLogout: () -> Unit) {
+    var showMenu by rememberSaveable { mutableStateOf(false) }
     Surface(
         modifier = Modifier.statusBarsPadding(),
-        color = Color.White,
+        color = appSurfaceColor(),
         shadowElevation = 1.dp
     ) {
         Row(
@@ -1874,28 +2407,43 @@ private fun ReiTopBar(onHome: (() -> Unit)?, onNewReport: () -> Unit, onLogout: 
             )
             Spacer(Modifier.weight(1f))
             Column(horizontalAlignment = Alignment.End) {
-                Text("R.E.I.", fontWeight = FontWeight.ExtraBold, color = Navy, style = MaterialTheme.typography.titleLarge)
+                Text("R.E.I.", fontWeight = FontWeight.ExtraBold, color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.titleLarge)
                 Text("Relatório de entrega", style = MaterialTheme.typography.labelSmall, color = Color(0xFF747B8E))
             }
             Spacer(Modifier.width(12.dp))
             if (onHome != null) {
                 IconButton(
                     onClick = onHome,
-                    modifier = Modifier.size(42.dp).clip(CircleShape).background(Color(0xFFF0F2F7))
+                    modifier = Modifier.size(42.dp).clip(CircleShape).background(MaterialTheme.colorScheme.surfaceVariant)
                 ) {
-                    Icon(Icons.Outlined.Home, contentDescription = "Dashboard", tint = Navy)
+                    Icon(Icons.Outlined.Home, contentDescription = "Dashboard", tint = MaterialTheme.colorScheme.primary)
                 }
                 Spacer(Modifier.width(7.dp))
             }
             IconButton(
                 onClick = onNewReport,
-                modifier = Modifier.size(42.dp).clip(CircleShape).background(Color(0xFFF0F2F7))
+                modifier = Modifier.size(42.dp).clip(CircleShape).background(MaterialTheme.colorScheme.surfaceVariant)
             ) {
                 Icon(Icons.Outlined.DeleteOutline, contentDescription = "Novo relatório", tint = Color(0xFF596174))
             }
             Spacer(Modifier.width(7.dp))
-            IconButton(onClick = onLogout, modifier = Modifier.size(42.dp).clip(CircleShape).background(Color(0xFFF0F2F7))) {
-                Icon(Icons.Outlined.Logout, contentDescription = "Sair", tint = Color(0xFF596174))
+            Box {
+                IconButton(
+                    onClick = { showMenu = true },
+                    modifier = Modifier.size(42.dp).clip(CircleShape).background(MaterialTheme.colorScheme.surfaceVariant)
+                ) {
+                    Icon(Icons.Outlined.Settings, contentDescription = "Configurações", tint = Color(0xFF596174))
+                }
+                DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
+                    DropdownMenuItem(
+                        text = { Text("Sair do sistema") },
+                        leadingIcon = { Icon(Icons.Outlined.Logout, contentDescription = null) },
+                        onClick = {
+                            showMenu = false
+                            onLogout()
+                        }
+                    )
+                }
             }
         }
     }
@@ -1953,21 +2501,21 @@ private fun StepSelector(selected: Int, onSelect: (Int) -> Unit) {
             Surface(
                 modifier = Modifier.clickable { onSelect(index) },
                 shape = RoundedCornerShape(14.dp),
-                color = if (active) Navy else Color.White,
-                border = if (active) null else androidx.compose.foundation.BorderStroke(1.dp, Border),
+                color = if (active) Navy else appSurfaceColor(),
+                border = if (active) null else androidx.compose.foundation.BorderStroke(1.dp, appBorderColor()),
                 shadowElevation = if (active) 4.dp else 0.dp
             ) {
                 Row(Modifier.padding(horizontal = 13.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
                     if (complete) Icon(Icons.Rounded.CheckCircle, null, Modifier.size(17.dp), tint = Green)
                     else Box(
                         Modifier.size(22.dp).clip(CircleShape)
-                            .background(if (active) Color.White.copy(alpha = .16f) else Color(0xFFF0F2F7)),
+                            .background(if (active) Color.White.copy(alpha = .16f) else MaterialTheme.colorScheme.surfaceVariant),
                         contentAlignment = Alignment.Center
                     ) {
                         Text("${index + 1}", color = if (active) Color.White else Navy, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
                     }
                     Spacer(Modifier.width(7.dp))
-                    Text(step.shortTitle, color = if (active) Color.White else Color(0xFF343B4D), fontWeight = FontWeight.SemiBold)
+                    Text(step.shortTitle, color = if (active) Color.White else appTextColor(), fontWeight = FontWeight.SemiBold)
                 }
             }
         }
@@ -1985,7 +2533,7 @@ private fun BottomActions(
 ) {
     Surface(
         modifier = Modifier.navigationBarsPadding(),
-        color = Color.White,
+        color = appSurfaceColor(),
         shadowElevation = 12.dp
     ) {
         Row(
@@ -1997,7 +2545,7 @@ private fun BottomActions(
                 onClick = onBack,
                 modifier = Modifier.height(52.dp),
                 shape = RoundedCornerShape(16.dp),
-                border = androidx.compose.foundation.BorderStroke(1.dp, Border)
+                border = androidx.compose.foundation.BorderStroke(1.dp, appBorderColor())
             ) {
                 Icon(Icons.AutoMirrored.Rounded.ArrowBack, null)
                 Spacer(Modifier.width(6.dp))
@@ -2115,13 +2663,13 @@ private fun AttachmentsCard(
     Card(
         Modifier.fillMaxWidth().padding(bottom = 14.dp),
         shape = RoundedCornerShape(22.dp),
-        colors = CardDefaults.cardColors(containerColor = Color.White),
-        border = androidx.compose.foundation.BorderStroke(1.dp, Border)
+        colors = CardDefaults.cardColors(containerColor = appSurfaceColor()),
+        border = androidx.compose.foundation.BorderStroke(1.dp, appBorderColor())
     ) {
         Column(Modifier.padding(18.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(Modifier.size(42.dp).clip(CircleShape).background(Color(0xFFE8EDFF)), contentAlignment = Alignment.Center) {
-                    Icon(Icons.Outlined.PhotoCamera, null, tint = Navy)
+                Box(Modifier.size(42.dp).clip(CircleShape).background(MaterialTheme.colorScheme.surfaceVariant), contentAlignment = Alignment.Center) {
+                    Icon(Icons.Outlined.PhotoCamera, null, tint = MaterialTheme.colorScheme.primary)
                 }
                 Spacer(Modifier.width(12.dp))
                 Column(Modifier.weight(1f)) {
@@ -2129,7 +2677,7 @@ private fun AttachmentsCard(
                     Text(
                         if (attachments.isEmpty()) "Inclua fotos das telas do sistema" else "${attachments.size} arquivo(s) adicionado(s)",
                         style = MaterialTheme.typography.bodySmall,
-                        color = Color(0xFF778095)
+                        color = appMutedColor()
                     )
                 }
             }
@@ -2150,7 +2698,7 @@ private fun AttachmentsCard(
                     onClick = onGallery,
                     modifier = Modifier.weight(1f).height(50.dp),
                     shape = RoundedCornerShape(15.dp),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, Border)
+                    border = androidx.compose.foundation.BorderStroke(1.dp, appBorderColor())
                 ) {
                     Icon(Icons.Outlined.PhotoLibrary, null, Modifier.size(19.dp))
                     Spacer(Modifier.width(6.dp))
@@ -2160,7 +2708,7 @@ private fun AttachmentsCard(
                     onClick = onFiles,
                     modifier = Modifier.weight(1f).height(50.dp),
                     shape = RoundedCornerShape(15.dp),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, Border)
+                    border = androidx.compose.foundation.BorderStroke(1.dp, appBorderColor())
                 ) {
                     Icon(Icons.Outlined.FolderOpen, null, Modifier.size(19.dp))
                     Spacer(Modifier.width(6.dp))
@@ -2181,18 +2729,18 @@ private fun AttachmentsCard(
 @Composable
 private fun AttachmentRow(item: ReportAttachment, onRemove: (String) -> Unit) {
     Row(
-        Modifier.fillMaxWidth().clip(RoundedCornerShape(15.dp)).background(Color(0xFFF5F7FB))
-            .border(1.dp, Border, RoundedCornerShape(15.dp)).padding(9.dp),
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(15.dp)).background(MaterialTheme.colorScheme.surfaceVariant)
+            .border(1.dp, appBorderColor(), RoundedCornerShape(15.dp)).padding(9.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Box(
-            Modifier.size(58.dp).clip(RoundedCornerShape(11.dp)).background(Color(0xFFE8ECF5)),
+            Modifier.size(58.dp).clip(RoundedCornerShape(11.dp)).background(appSurfaceColor()),
             contentAlignment = Alignment.Center
         ) {
             if (item.mimeType.startsWith("image/")) {
                 AttachmentThumbnail(item.uri)
             } else {
-                Icon(Icons.Outlined.Description, null, tint = Navy, modifier = Modifier.size(28.dp))
+                Icon(Icons.Outlined.Description, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(28.dp))
             }
         }
         Spacer(Modifier.width(11.dp))
@@ -2201,11 +2749,11 @@ private fun AttachmentRow(item: ReportAttachment, onRemove: (String) -> Unit) {
             Text(
                 if (item.mimeType.startsWith("image/")) "Imagem" else "Documento",
                 style = MaterialTheme.typography.bodySmall,
-                color = Color(0xFF778095)
+                color = appMutedColor()
             )
         }
         IconButton(onClick = { onRemove(item.uri) }) {
-            Icon(Icons.Outlined.Close, contentDescription = "Remover anexo", tint = Color(0xFF777F91))
+            Icon(Icons.Outlined.Close, contentDescription = "Remover anexo", tint = appMutedColor())
         }
     }
 }
@@ -2216,8 +2764,16 @@ private fun AttachmentThumbnail(uri: String) {
     val image by produceState<ImageBitmap?>(null, uri) {
         value = withContext(Dispatchers.IO) {
             runCatching {
-                context.contentResolver.openInputStream(Uri.parse(uri))?.use { stream ->
-                    BitmapFactory.decodeStream(stream)?.asImageBitmap()
+                if (uri.startsWith("data:image", ignoreCase = true)) {
+                    val base64 = uri.substringAfter("base64,", "")
+                    if (base64.isNotBlank()) {
+                        val bytes = android.util.Base64.decode(base64, android.util.Base64.DEFAULT)
+                        BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap()
+                    } else null
+                } else {
+                    context.contentResolver.openInputStream(Uri.parse(uri))?.use { stream ->
+                        BitmapFactory.decodeStream(stream)?.asImageBitmap()
+                    }
                 }
             }.getOrNull()
         }
@@ -2227,15 +2783,89 @@ private fun AttachmentThumbnail(uri: String) {
         contentDescription = null,
         modifier = Modifier.fillMaxSize(),
         contentScale = ContentScale.Crop
-    ) else Icon(Icons.Outlined.PhotoLibrary, null, tint = Navy)
+    ) else Icon(Icons.Outlined.PhotoLibrary, null, tint = MaterialTheme.colorScheme.primary)
 }
 
 @Composable
 private fun ChecklistStep(scope: String, groups: List<ChecklistGroup>, data: ReportData, vm: ReportViewModel) {
-    groups.forEach { group ->
-        val done = group.items.count { ReportSchema.key(scope, group.title, it) in data.checks }
-        SectionCard(group.title, "$done de ${group.items.size} concluídos") {
-            CheckItems(group.items, data, vm) { ReportSchema.key(scope, group.title, it) }
+    val dynamicGroups = ReportSchema.dynamicFields(scope)
+    val titles = (groups.map { it.title } + dynamicGroups.map { it.title }).distinctBy { it.lowercase() }
+    titles.forEach { title ->
+        val group = groups.firstOrNull { it.title.equals(title, ignoreCase = true) }
+        val dynamic = dynamicGroups.firstOrNull { it.title.equals(title, ignoreCase = true) }
+        val checklistItems = group?.items.orEmpty()
+        val fields = dynamic?.fields.orEmpty()
+        val done = checklistItems.count { ReportSchema.key(scope, title, it) in data.checks }
+        val subtitle = buildList {
+            if (checklistItems.isNotEmpty()) add("$done de ${checklistItems.size} concluídos")
+            if (fields.isNotEmpty()) add("${fields.size} campo(s) personalizado(s)")
+        }.joinToString(" • ")
+        SectionCard(title, subtitle) {
+            if (checklistItems.isNotEmpty()) {
+                CheckItems(checklistItems, data, vm) { ReportSchema.key(scope, title, it) }
+            }
+            fields.forEach { field ->
+                SurveyField(
+                    SurveyFieldDef(
+                        key = ReportSchema.fieldKey(scope, title, field.label),
+                        label = field.label,
+                        type = when (field.type) {
+                            "choice" -> SurveyFieldType.Choice
+                            "textarea" -> SurveyFieldType.TextArea
+                            "date", "datetime-local" -> SurveyFieldType.DateTime
+                            "photo" -> SurveyFieldType.Photo
+                            else -> SurveyFieldType.Text
+                        },
+                        options = field.options.ifEmpty { if (field.type == "choice") yesNoOptions else emptyList() },
+                        minLines = if (field.type == "textarea") 3 else 1
+                    ),
+                    data,
+                    vm
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun SurveyCompletedViewer(data: ReportData) {
+    activeSurveySections().forEach { section ->
+        val informedFields = section.fields.filter { field ->
+            data.field(field.key).isNotBlank() || (field.key == "empresa" && data.field("cliente").isNotBlank())
+        }
+        if (informedFields.isNotEmpty()) {
+            ViewerSection(section.title) {
+                informedFields.forEachIndexed { index, field ->
+                    val value = data.field(field.key).ifBlank {
+                        if (field.key == "empresa") data.field("cliente") else ""
+                    }
+                    if (field.type == SurveyFieldType.Photo) {
+                        ViewerImage(field.label, value)
+                    } else {
+                        ViewerValue(field.label, value, divider = index < informedFields.lastIndex)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ViewerDynamicFields(title: String, scope: String, data: ReportData) {
+    val values = ReportSchema.dynamicFields(scope).flatMap { group ->
+        group.fields.mapNotNull { field ->
+            val value = data.field(ReportSchema.fieldKey(scope, group.title, field.label))
+            if (value.isBlank()) null else Triple(group.title, field, value)
+        }
+    }
+    if (values.isEmpty()) return
+    ViewerSection(title) {
+        values.forEachIndexed { index, (group, field, value) ->
+            if (field.type == "photo") {
+                ViewerImage("$group • ${field.label}", value)
+            } else {
+                ViewerValue("$group • ${field.label}", value, divider = index < values.lastIndex)
+            }
         }
     }
 }
@@ -2245,11 +2875,11 @@ private fun FormCard(title: String, content: @Composable () -> Unit) {
     Card(
         Modifier.fillMaxWidth().padding(bottom = 14.dp),
         shape = RoundedCornerShape(22.dp),
-        colors = CardDefaults.cardColors(containerColor = Color.White),
-        border = androidx.compose.foundation.BorderStroke(1.dp, Border)
+        colors = CardDefaults.cardColors(containerColor = appSurfaceColor()),
+        border = androidx.compose.foundation.BorderStroke(1.dp, appBorderColor())
     ) {
         Column(Modifier.padding(18.dp)) {
-            Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = Color(0xFF232B3D))
+            Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = appTextColor())
             Spacer(Modifier.height(16.dp))
             content()
         }
@@ -2261,16 +2891,16 @@ private fun SectionCard(title: String, subtitle: String, content: @Composable ()
     Card(
         Modifier.fillMaxWidth().padding(bottom = 14.dp),
         shape = RoundedCornerShape(22.dp),
-        colors = CardDefaults.cardColors(containerColor = Color.White),
-        border = androidx.compose.foundation.BorderStroke(1.dp, Border)
+        colors = CardDefaults.cardColors(containerColor = appSurfaceColor()),
+        border = androidx.compose.foundation.BorderStroke(1.dp, appBorderColor())
     ) {
         Column {
             Column(Modifier.padding(start = 18.dp, end = 18.dp, top = 17.dp, bottom = 13.dp)) {
-                Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = Color(0xFF232B3D))
+                Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = appTextColor())
                 Spacer(Modifier.height(3.dp))
-                Text(subtitle, style = MaterialTheme.typography.bodySmall, color = Color(0xFF778095))
+                Text(subtitle, style = MaterialTheme.typography.bodySmall, color = appMutedColor())
             }
-            HorizontalDivider(color = Border)
+            HorizontalDivider(color = appBorderColor())
             Column(Modifier.padding(vertical = 7.dp)) { content() }
         }
     }
@@ -2283,7 +2913,7 @@ private fun CheckItems(items: List<String>, data: ReportData, vm: ReportViewMode
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 9.dp, vertical = 2.dp)
                 .clip(RoundedCornerShape(13.dp))
-                .background(if (checked) Color(0xFFF1F8EF) else Color.Transparent)
+                .background(if (checked) MaterialTheme.colorScheme.secondary.copy(alpha = .16f) else Color.Transparent)
                 .clickable { vm.toggle(keyFor(item)) }
                 .padding(horizontal = 5.dp, vertical = 5.dp),
             verticalAlignment = Alignment.CenterVertically
@@ -2297,7 +2927,7 @@ private fun CheckItems(items: List<String>, data: ReportData, vm: ReportViewMode
                 item,
                 Modifier.weight(1f).padding(end = 8.dp),
                 style = MaterialTheme.typography.bodyMedium,
-                color = if (checked) Color(0xFF34512D) else Color(0xFF3D4558)
+                color = if (checked) MaterialTheme.colorScheme.secondary else appTextColor()
             )
         }
     }
@@ -2310,12 +2940,12 @@ private fun RadioOptions(options: List<String>, selected: String, onSelect: (Str
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 9.dp, vertical = 2.dp)
                 .clip(RoundedCornerShape(13.dp))
-                .background(if (active) Color(0xFFF0F3FF) else Color.Transparent)
+                .background(if (active) MaterialTheme.colorScheme.primary.copy(alpha = .12f) else Color.Transparent)
                 .clickable { onSelect(option) }.padding(horizontal = 5.dp, vertical = 5.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             RadioButton(selected = active, onClick = null)
-            Text(option, color = Color(0xFF3D4558))
+            Text(option, color = appTextColor())
         }
     }
 }
@@ -2330,14 +2960,81 @@ private fun SurveyField(field: SurveyFieldDef, data: ReportData, vm: ReportViewM
         SurveyFieldType.Choice -> ChoiceField(field, data, vm)
         SurveyFieldType.TextArea -> FormField(field.label, field.key, data, vm, minLines = field.minLines)
         SurveyFieldType.DateTime -> DateTimeField(field.label, field.key, data, vm)
+        SurveyFieldType.Photo -> PhotoField(field.label, field.key, data, vm)
         SurveyFieldType.Text -> FormField(field.label, field.key, data, vm)
+    }
+}
+
+@Composable
+private fun PhotoField(label: String, key: String, data: ReportData, vm: ReportViewModel) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val cameraFile = remember { File(context.cacheDir, "survey_${key}_${System.currentTimeMillis()}.jpg") }
+    val cameraUri = remember(cameraFile) {
+        FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", cameraFile)
+    }
+    val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { saved ->
+        if (saved) vm.setField(key, cameraUri.toString())
+    }
+    val galleryLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            runCatching {
+                context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            vm.setField(key, uri.toString())
+        }
+    }
+
+    Column(Modifier.fillMaxWidth().padding(bottom = 12.dp)) {
+        Text(label, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, color = appMutedColor())
+        Spacer(Modifier.height(7.dp))
+        Surface(
+            modifier = Modifier.fillMaxWidth().clickable { },
+            shape = RoundedCornerShape(16.dp),
+            color = appSurfaceColor(),
+            border = androidx.compose.foundation.BorderStroke(1.dp, appBorderColor())
+        ) {
+            Column(Modifier.padding(12.dp)) {
+                if (data.field(key).isNotBlank()) {
+                    AttachmentThumbnail(data.field(key))
+                    Spacer(Modifier.height(10.dp))
+                } else {
+                    Box(
+                        Modifier.fillMaxWidth().height(116.dp).clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.surfaceVariant),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Icon(Icons.Outlined.PhotoCamera, null, tint = MaterialTheme.colorScheme.primary)
+                            Spacer(Modifier.height(6.dp))
+                            Text("Adicione uma foto", color = appMutedColor())
+                        }
+                    }
+                    Spacer(Modifier.height(10.dp))
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = { cameraLauncher.launch(cameraUri) }, modifier = Modifier.weight(1f)) {
+                        Icon(Icons.Outlined.PhotoCamera, null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Câmera")
+                    }
+                    OutlinedButton(onClick = { galleryLauncher.launch(arrayOf("image/*")) }, modifier = Modifier.weight(1f)) {
+                        Icon(Icons.Outlined.PhotoLibrary, null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Galeria")
+                    }
+                }
+                if (data.field(key).isNotBlank()) {
+                    Spacer(Modifier.height(8.dp))
+                    TextButton(onClick = { vm.setField(key, "") }) { Text("Remover foto") }
+                }
+            }
+        }
     }
 }
 
 @Composable
 private fun ChoiceField(field: SurveyFieldDef, data: ReportData, vm: ReportViewModel) {
     Column(Modifier.fillMaxWidth().padding(bottom = 12.dp)) {
-        Text(field.label, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, color = Color(0xFF596174))
+        Text(field.label, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, color = appMutedColor())
         Spacer(Modifier.height(7.dp))
         Row(
             Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
@@ -2348,12 +3045,12 @@ private fun ChoiceField(field: SurveyFieldDef, data: ReportData, vm: ReportViewM
                 Surface(
                     modifier = Modifier.clickable { vm.setField(field.key, option) },
                     shape = RoundedCornerShape(50),
-                    color = if (selected) Color(0xFFEBF5E8) else Color.White,
-                    border = androidx.compose.foundation.BorderStroke(1.dp, if (selected) Green else Color(0xFFD7DBE5))
+                    color = if (selected) MaterialTheme.colorScheme.secondary.copy(alpha = .16f) else appSurfaceColor(),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, if (selected) Green else appBorderColor())
                 ) {
                     Row(Modifier.padding(end = 12.dp).height(42.dp), verticalAlignment = Alignment.CenterVertically) {
                         RadioButton(selected = selected, onClick = { vm.setField(field.key, option) })
-                        Text(option, style = MaterialTheme.typography.labelLarge, color = if (selected) Color(0xFF3E7034) else Navy, fontWeight = FontWeight.Bold)
+                        Text(option, style = MaterialTheme.typography.labelLarge, color = if (selected) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
                     }
                 }
             }
@@ -2371,10 +3068,14 @@ private fun FormField(label: String, key: String, data: ReportData, vm: ReportVi
         modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp),
         shape = RoundedCornerShape(15.dp),
         colors = OutlinedTextFieldDefaults.colors(
-            focusedBorderColor = Navy,
-            unfocusedBorderColor = Color(0xFFD7DBE5),
-            focusedContainerColor = Color(0xFFFBFCFF),
-            unfocusedContainerColor = Color(0xFFFBFCFF)
+            focusedBorderColor = MaterialTheme.colorScheme.primary,
+            unfocusedBorderColor = appBorderColor(),
+            focusedContainerColor = appSurfaceColor(),
+            unfocusedContainerColor = appSurfaceColor(),
+            focusedTextColor = appTextColor(),
+            unfocusedTextColor = appTextColor(),
+            focusedLabelColor = MaterialTheme.colorScheme.primary,
+            unfocusedLabelColor = appMutedColor()
         )
     )
 }
@@ -2389,19 +3090,19 @@ private fun DateTimeField(label: String, key: String, data: ReportData, vm: Repo
     Surface(
         modifier = Modifier.fillMaxWidth().height(64.dp).padding(bottom = 12.dp).clickable { showCalendar = true },
         shape = RoundedCornerShape(15.dp),
-        color = Color(0xFFFBFCFF),
-        border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFD7DBE5))
+        color = appSurfaceColor(),
+        border = androidx.compose.foundation.BorderStroke(1.dp, appBorderColor())
     ) {
         Row(Modifier.padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 if (data.field(key).isNotBlank()) {
-                    Text(label, style = MaterialTheme.typography.labelMedium, color = Navy)
-                    Text(data.field(key), style = MaterialTheme.typography.bodyMedium, color = Color(0xFF3D4558))
+                    Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+                    Text(data.field(key), style = MaterialTheme.typography.bodyMedium, color = appTextColor())
                 } else {
-                    Text(label, style = MaterialTheme.typography.bodyMedium, color = Color(0xFF666C7B))
+                    Text(label, style = MaterialTheme.typography.bodyMedium, color = appMutedColor())
                 }
             }
-            Icon(Icons.Outlined.CalendarMonth, contentDescription = "Abrir calendário", tint = Navy)
+            Icon(Icons.Outlined.CalendarMonth, contentDescription = "Abrir calendário", tint = MaterialTheme.colorScheme.primary)
         }
     }
 
@@ -2442,13 +3143,13 @@ private fun SignatureField(
 ) {
     var showPad by rememberSaveable { mutableStateOf(false) }
     Column {
-        Text(title, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold, color = Color(0xFF3D4558))
+        Text(title, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold, color = appTextColor())
         Spacer(Modifier.height(8.dp))
         Surface(
             modifier = Modifier.fillMaxWidth().height(132.dp).clickable { showPad = true },
             shape = RoundedCornerShape(16.dp),
-            color = Color(0xFFFBFCFF),
-            border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFD7DBE5))
+            color = appSurfaceColor(),
+            border = androidx.compose.foundation.BorderStroke(1.dp, appBorderColor())
         ) {
             if (value.isNotBlank()) {
                 Box {
@@ -2456,19 +3157,19 @@ private fun SignatureField(
                     Surface(
                         modifier = Modifier.align(Alignment.TopEnd).padding(8.dp),
                         shape = CircleShape,
-                        color = Color.White.copy(alpha = .92f),
+                        color = appSurfaceColor().copy(alpha = .92f),
                         shadowElevation = 2.dp
                     ) {
                         IconButton(onClick = { onSaved(key, "") }, modifier = Modifier.size(36.dp)) {
-                            Icon(Icons.Outlined.Close, contentDescription = "Remover assinatura", tint = Color(0xFF6D7485))
+                            Icon(Icons.Outlined.Close, contentDescription = "Remover assinatura", tint = appMutedColor())
                         }
                     }
                 }
             } else {
                 Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-                    Icon(Icons.Outlined.Draw, null, tint = Navy, modifier = Modifier.size(30.dp))
+                    Icon(Icons.Outlined.Draw, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(30.dp))
                     Spacer(Modifier.height(7.dp))
-                    Text("Toque para assinar na tela", color = Navy, fontWeight = FontWeight.SemiBold)
+                    Text("Toque para assinar na tela", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
                 }
             }
         }
@@ -2493,7 +3194,7 @@ private fun SignaturePadDialog(
     var canvasSize by androidx.compose.runtime.remember { mutableStateOf(IntSize.Zero) }
     AlertDialog(
         onDismissRequest = onDismiss,
-        icon = { Icon(Icons.Outlined.Draw, null, tint = Navy) },
+        icon = { Icon(Icons.Outlined.Draw, null, tint = MaterialTheme.colorScheme.primary) },
         title = { Text(title) },
         text = {
             Column {
@@ -2543,7 +3244,8 @@ private fun SignaturePadDialog(
 private fun InfoCard(title: String, email: String, phone: String) {
     Row(
         Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp))
-            .background(Color(0xFFEBF5E8)).border(1.dp, Color(0xFFCFE7C9), RoundedCornerShape(20.dp))
+            .background(MaterialTheme.colorScheme.secondary.copy(alpha = .13f))
+            .border(1.dp, MaterialTheme.colorScheme.secondary.copy(alpha = .32f), RoundedCornerShape(20.dp))
             .padding(18.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -2552,9 +3254,9 @@ private fun InfoCard(title: String, email: String, phone: String) {
         }
         Spacer(Modifier.width(13.dp))
         Column {
-            Text(title, fontWeight = FontWeight.Bold, color = Color(0xFF2F4B29))
-            Text(email, style = MaterialTheme.typography.bodySmall, color = Color(0xFF50664B))
-            Text(phone, style = MaterialTheme.typography.bodySmall, color = Color(0xFF50664B))
+            Text(title, fontWeight = FontWeight.Bold, color = appTextColor())
+            Text(email, style = MaterialTheme.typography.bodySmall, color = appMutedColor())
+            Text(phone, style = MaterialTheme.typography.bodySmall, color = appMutedColor())
         }
     }
 }

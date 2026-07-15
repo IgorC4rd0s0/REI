@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
+import br.com.dubrasil.rei.model.ReportSchema
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
@@ -48,7 +49,7 @@ class CentralSyncClient(private val context: Context) {
     private fun reportWithPrintableImages(report: JSONObject): JSONObject {
         val copy = JSONObject(report.toString())
         val fields = copy.optJSONObject("fields") ?: JSONObject().also { copy.put("fields", it) }
-        listOf("assinaturaAnalistaImagem", "assinaturaClienteImagem").forEach { key ->
+        listOf("assinaturaAnalistaImagem", "assinaturaClienteImagem").plus(photoFieldKeys()).forEach { key ->
             val value = fields.optString(key)
             if (value.isNotBlank()) {
                 fields.put(key, printableImageDataUrl(value, "image/png") ?: value)
@@ -71,6 +72,11 @@ class CentralSyncClient(private val context: Context) {
         }
         return copy
     }
+
+    private fun photoFieldKeys(): List<String> =
+        ReportSchema.surveySections.flatMap { section ->
+            section.fields.filter { it.type.equals("photo", ignoreCase = true) }.map { it.key }
+        }.distinct()
 
     private fun printableImageDataUrl(value: String, fallbackMimeType: String): String? {
         if (value.startsWith("data:image")) return value
@@ -154,8 +160,8 @@ class CentralSyncClient(private val context: Context) {
 
     fun fetchSchemaOverrides(): Result<Unit> = runCatching {
         val baseUrl = AuthStore.normalizeServerUrl(auth.serverUrl())
-        require(baseUrl.isNotBlank()) { "Servidor central nÃ£o configurado" }
-        require(auth.token().isNotBlank()) { "UsuÃ¡rio nÃ£o autenticado" }
+        require(baseUrl.isNotBlank()) { "Servidor central não configurado" }
+        require(auth.token().isNotBlank()) { "Usuário não autenticado" }
 
         val connection = (URL("$baseUrl/api/schema-overrides").openConnection() as HttpURLConnection).apply {
             requestMethod = "GET"

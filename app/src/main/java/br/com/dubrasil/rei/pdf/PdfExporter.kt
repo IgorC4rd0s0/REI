@@ -91,7 +91,15 @@ object PdfExporter {
             writer.groups("supervisao", ReportSchema.supervision)
         }
 
-        if (data.attachments.isNotEmpty()) {
+        val customPhotos = listOf("tecnico", "estoque", "financeiro", "fiscal").flatMap { scope ->
+            ReportSchema.dynamicFields(scope).flatMap { group ->
+                group.fields.filter { it.type == "photo" }.mapNotNull { field ->
+                    val value = data.field(ReportSchema.fieldKey(scope, group.title, field.label))
+                    if (value.isBlank()) null else "${group.title} • ${field.label}" to value
+                }
+            }
+        }
+        if (data.attachments.isNotEmpty() || customPhotos.isNotEmpty()) {
             writer.section("EVIDÊNCIAS E ANEXOS", reserveAfter = 70f)
             data.attachments.forEachIndexed { index, attachment ->
                 if (attachment.mimeType.startsWith("image/")) {
@@ -100,6 +108,7 @@ object PdfExporter {
                     writer.fileReference(attachment.name)
                 }
             }
+            customPhotos.forEach { (label, uri) -> writer.evidence(label, Uri.parse(uri)) }
         }
 
         writer.finish()
@@ -127,8 +136,10 @@ object PdfExporter {
         activeSurveyPrintSections().forEach { section ->
             writer.section(section.title)
             val choices = section.fields.filter { it.type == "choice" }
-            val texts = section.fields.filterNot { it.type == "choice" }
+            val photos = section.fields.filter { it.type == "photo" }
+            val texts = section.fields.filterNot { it.type in setOf("choice", "photo") }
             if (choices.isNotEmpty()) writer.infoTable(choices.map { it.label to data.field(it.key) })
+            photos.forEach { field -> writer.photoBox(field.label, data.field(field.key)) }
             texts.forEach { field ->
                 writer.paragraphBox(field.label, data.field(field.key), if (field.type == "textarea") 58f else 38f)
             }
@@ -199,18 +210,27 @@ object PdfExporter {
                     type = when (field.type.lowercase(Locale.ROOT)) {
                         "choice" -> "choice"
                         "textarea" -> "textarea"
+                        "photo" -> "photo"
                         else -> "text"
                     }
                 )
             }
-            val index = result.indexOfFirst { it.title.equals(title, ignoreCase = true) || it.title.equals(custom.title, ignoreCase = true) }
-            if (index >= 0) {
-                val current = result[index]
-                result[index] = current.copy(fields = current.fields + fields.filterNot { customField ->
-                    current.fields.any { it.key == customField.key }
-                })
-            } else if (fields.isNotEmpty()) {
-                result.add(SurveyPrintSection(title, fields))
+            fields.forEach { customField ->
+                val existingSectionIndex = result.indexOfFirst { section -> section.fields.any { it.key == customField.key } }
+                if (existingSectionIndex >= 0) {
+                    val current = result[existingSectionIndex]
+                    val merged = current.fields.toMutableList()
+                    merged[merged.indexOfFirst { it.key == customField.key }] = customField
+                    result[existingSectionIndex] = current.copy(fields = merged)
+                } else {
+                    val targetIndex = result.indexOfFirst { it.title.equals(title, ignoreCase = true) || it.title.equals(custom.title, ignoreCase = true) }
+                    if (targetIndex >= 0) {
+                        val current = result[targetIndex]
+                        result[targetIndex] = current.copy(fields = current.fields + customField)
+                    } else {
+                        result.add(SurveyPrintSection(title, listOf(customField)))
+                    }
+                }
             }
         }
         return result
@@ -261,9 +281,20 @@ object PdfExporter {
         }
 
         fun groups(scope: String, groups: List<ChecklistGroup>) {
-            groups.forEach { group ->
-                subsection(group.title)
-                checklist(group.items, columns = 2) { ReportSchema.key(scope, group.title, it) }
+            val dynamicGroups = ReportSchema.dynamicFields(scope)
+            val titles = (groups.map { it.title } + dynamicGroups.map { it.title }).distinctBy { it.lowercase() }
+            titles.forEach { title ->
+                val group = groups.firstOrNull { it.title.equals(title, ignoreCase = true) }
+                val dynamic = dynamicGroups.firstOrNull { it.title.equals(title, ignoreCase = true) }
+                subsection(title)
+                if (!group?.items.isNullOrEmpty()) {
+                    checklist(group!!.items, columns = 2) { ReportSchema.key(scope, title, it) }
+                }
+                val fields = dynamic?.fields.orEmpty().map { field ->
+                    val value = data.field(ReportSchema.fieldKey(scope, title, field.label))
+                    field.label to if (field.type == "photo" && value.isNotBlank()) "Foto anexada" else value
+                }
+                if (fields.isNotEmpty()) infoTable(fields)
                 space(4f)
             }
         }
@@ -332,6 +363,32 @@ object PdfExporter {
             page.canvas.drawText(label.uppercase(), left + 9f, y + 13f, paint(7.8f, navy, true))
             lines.forEachIndexed { index, line -> page.canvas.drawText(line, left + 9f, y + 29f + index * 11f, body) }
             y += height + 7f
+        }
+
+        fun photoBox(label: String, value: String) {
+            val uriText = value.trim()
+            if (uriText.isBlank()) {
+                paragraphBox(label, "Não informado", 38f)
+                return
+            }
+            val bitmap = loadBitmap(Uri.parse(uriText))
+            if (bitmap == null) {
+                paragraphBox(label, "Foto anexada", 38f)
+                return
+            }
+            val maxWidth = contentWidth - 20f
+            val maxHeight = 150f
+            val scale = min(maxWidth / bitmap.width, maxHeight / bitmap.height)
+            val drawWidth = bitmap.width * scale
+            val drawHeight = bitmap.height * scale
+            ensure(drawHeight + 42f)
+            page.canvas.drawRoundRect(RectF(left, y, right, y + drawHeight + 28f), 5f, 5f, Paint().apply { color = Color.WHITE })
+            page.canvas.drawRoundRect(RectF(left, y, right, y + drawHeight + 28f), 5f, 5f, linePaint)
+            page.canvas.drawText(label.uppercase(), left + 9f, y + 13f, paint(7.8f, navy, true))
+            val x = left + (contentWidth - drawWidth) / 2f
+            page.canvas.drawBitmap(bitmap, null, RectF(x, y + 18f, x + drawWidth, y + 18f + drawHeight), body)
+            y += drawHeight + 35f
+            bitmap.recycle()
         }
 
         fun statusBox(selected: String) {
@@ -495,6 +552,14 @@ object PdfExporter {
         }
 
         private fun loadBitmap(uri: Uri): Bitmap? = runCatching {
+            val raw = uri.toString()
+            if (raw.startsWith("data:image", ignoreCase = true)) {
+                val base64 = raw.substringAfter("base64,", "")
+                if (base64.isNotBlank()) {
+                    val bytes = android.util.Base64.decode(base64, android.util.Base64.DEFAULT)
+                    return BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                }
+            }
             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
             context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
             var sample = 1

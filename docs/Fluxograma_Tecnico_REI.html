@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <title>Fluxograma técnico do R.E.I.</title>
+  <style>
+    @page { size: A3 landscape; margin: 0; }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; background: #dfe5f0; color: #101a34; font-family: "Segoe UI", Arial, sans-serif; }
+    .page { position: relative; width: 420mm; height: 297mm; padding: 13mm 15mm 14mm; overflow: hidden; background: #f6f8fc; }
+    header { display: flex; align-items: center; gap: 6mm; height: 28mm; padding: 4mm 6mm; border-radius: 5mm; background: linear-gradient(120deg, #142452, #29458e); color: #fff; }
+    header img { width: 20mm; height: 20mm; object-fit: contain; border-radius: 50%; background: #fff; }
+    header h1 { margin: 0; font-size: 24pt; }
+    header p { margin: 1mm 0 0; color: #dbe3ff; font-size: 10.5pt; }
+    .legend { margin-left: auto; display: flex; gap: 3mm; align-items: center; font-size: 8.5pt; }
+    .legend span { padding: 2mm 3mm; border-radius: 6mm; background: rgba(255,255,255,.12); }
+    .diagram { display: grid; grid-template-columns: 31mm 1fr; gap: 4mm; margin-top: 5mm; }
+    .lane-labels { display: grid; grid-template-rows: 54mm 65mm 65mm 35mm; gap: 4mm; }
+    .lane-label { display: flex; align-items: center; justify-content: center; padding: 3mm; border-radius: 4mm; color: #fff; font-size: 10pt; font-weight: 800; text-align: center; writing-mode: vertical-rl; transform: rotate(180deg); }
+    .mobile { background: #2e559d; }
+    .server { background: #21366d; }
+    .admin { background: #398a3e; }
+    .outputs { background: #6b4a9d; }
+    .lanes { display: grid; grid-template-rows: 54mm 65mm 65mm 35mm; gap: 4mm; }
+    .lane { position: relative; display: flex; align-items: center; justify-content: center; gap: 3mm; padding: 5mm; border: 1px solid #d5ddeb; border-radius: 4mm; background: #fff; }
+    .node { position: relative; display: flex; flex-direction: column; justify-content: center; width: 45mm; min-height: 32mm; padding: 4mm; border: 1px solid #cbd5e8; border-radius: 4mm; background: #f8faff; box-shadow: 0 2mm 4mm rgba(28,47,94,.07); text-align: center; }
+    .node.wide { width: 52mm; }
+    .node.green { border-color: #a9d4a6; background: #f0f8ee; }
+    .node.purple { border-color: #c9b8e2; background: #f6f1fb; }
+    .node.dark { border-color: #29458e; background: #edf1fb; }
+    .node strong { display: block; margin-bottom: 1.5mm; color: #172e68; font-size: 10pt; line-height: 1.15; }
+    .node span { color: #5b6883; font-size: 8.2pt; line-height: 1.28; }
+    .badge { position: absolute; top: -3mm; left: -3mm; display: flex; width: 8mm; height: 8mm; align-items: center; justify-content: center; border-radius: 50%; background: #29458e; color: #fff !important; font-size: 8pt !important; font-weight: 800; }
+    .arrow { flex: 0 0 12mm; color: #3a5595; font-size: 22pt; font-weight: 800; text-align: center; }
+    .arrow.bi { color: #3b9840; }
+    .split { display: flex; flex-direction: column; gap: 2.5mm; }
+    .split .node { min-height: 22mm; }
+    .note { position: absolute; right: 5mm; bottom: 3mm; color: #66728e; font-size: 7.5pt; }
+    footer { position: absolute; left: 15mm; right: 15mm; bottom: 5mm; display: flex; justify-content: space-between; padding-top: 2.5mm; border-top: 1px solid #d5ddeb; color: #66728e; font-size: 8pt; }
+    @media print { html, body { background: #fff; } * { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }
+  </style>
+</head>
+<body>
+  <section class="page">
+    <header>
+      <img src="../logo_dbs_app.png" alt="DuBrasil Soluções">
+      <div><h1>Fluxograma técnico do R.E.I.</h1><p>Arquitetura, autenticação, trabalho offline, sincronização, persistência e saídas.</p></div>
+      <div class="legend"><span>Android · Kotlin/Compose</span><span>Web · HTML/CSS/JS</span><span>API · Python</span><span>Dados · Room/SQLite/JSON</span></div>
+    </header>
+
+    <div class="diagram">
+      <div class="lane-labels">
+        <div class="lane-label mobile">ACESSO E DISPOSITIVO</div>
+        <div class="lane-label server">SINCRONIZAÇÃO E SERVIDOR</div>
+        <div class="lane-label admin">CONFIGURAÇÃO DINÂMICA</div>
+        <div class="lane-label outputs">SAÍDAS E GESTÃO</div>
+      </div>
+
+      <div class="lanes">
+        <div class="lane">
+          <div class="split">
+            <div class="node dark"><span class="badge">1A</span><strong>Aplicativo Android</strong><span>Login, formulários, câmera, assinaturas e notificações.</span></div>
+            <div class="node"><span class="badge">1B</span><strong>Navegador web</strong><span>Dashboards, administração, formulários e impressão.</span></div>
+          </div>
+          <div class="arrow">→</div>
+          <div class="node wide"><span class="badge">2</span><strong>Autenticação</strong><span><code>/api/auth/login</code><br>PBKDF2, sessão por token e perfil do usuário.</span></div>
+          <div class="arrow">→</div>
+          <div class="node wide"><span class="badge">3</span><strong>Autorização por perfil</strong><span>Supervisor ou implantador. A API limita dados e operações.</span></div>
+          <div class="arrow">→</div>
+          <div class="node wide"><span class="badge">4</span><strong>Estado da aplicação</strong><span>Levantamentos, R.E.I., avaliações, anexos e preferências.</span></div>
+        </div>
+
+        <div class="lane">
+          <div class="node dark"><span class="badge">5</span><strong>Room no Android</strong><span><code>rei_database.db</code><br>Relatórios, login em cache e situação da sincronização.</span></div>
+          <div class="arrow">→</div>
+          <div class="node"><span class="badge">6</span><strong>Fila pendente</strong><span>Alterações offline ficam preservadas até existir rede adequada.</span></div>
+          <div class="arrow">→</div>
+          <div class="node dark"><span class="badge">7</span><strong>WorkManager</strong><span>Executa em rede não medida, com repetição e backoff exponencial.</span></div>
+          <div class="arrow">⇄</div>
+          <div class="node wide"><span class="badge">8</span><strong>API Python</strong><span><code>/api/reports</code><br>Valida sessão, regras, payload e responsável.</span></div>
+          <div class="arrow">⇄</div>
+          <div class="node wide green"><span class="badge">9</span><strong>SQLite central</strong><span><code>rei_central.db</code><br>Usuários, sessões, relatórios e histórico sincronizado.</span></div>
+          <span class="note">Web acessa a API diretamente; Android pode trabalhar offline antes de sincronizar.</span>
+        </div>
+
+        <div class="lane">
+          <div class="node green"><span class="badge">10</span><strong>Supervisor</strong><span>Cadastra tópicos, itens, tipos e opções dos formulários.</span></div>
+          <div class="arrow bi">→</div>
+          <div class="node green wide"><span class="badge">11</span><strong>Itens dos relatórios</strong><span><code>schema_items.json</code><br>Personalizações e ajustes dos campos padrão.</span></div>
+          <div class="arrow bi">→</div>
+          <div class="node green wide"><span class="badge">12</span><strong>API de esquema</strong><span><code>/api/schema-overrides</code><br>Normaliza objetos, chaves, tipos e escolhas.</span></div>
+          <div class="arrow bi">→</div>
+          <div class="split">
+            <div class="node green"><span class="badge">13A</span><strong>Web atualizada</strong><span>Renderiza o tipo correto do campo.</span></div>
+            <div class="node green"><span class="badge">13B</span><strong>Android atualizado</strong><span>Baixa itens durante login/sincronização.</span></div>
+          </div>
+          <div class="arrow bi">→</div>
+          <div class="node green"><span class="badge">14</span><strong>Preenchimento</strong><span>Valores retornam no payload do mesmo relatório.</span></div>
+        </div>
+
+        <div class="lane">
+          <div class="node purple wide"><strong>PDF Android</strong><span>PdfExporter + compartilhamento por FileProvider.</span></div>
+          <div class="arrow">·</div>
+          <div class="node purple wide"><strong>PDF Web</strong><span>Layout de impressão do navegador.</span></div>
+          <div class="arrow">·</div>
+          <div class="node purple wide"><strong>Notificações</strong><span>Agenda, pendências e avaliação.</span></div>
+          <div class="arrow">·</div>
+          <div class="node purple wide"><strong>CSV / BI</strong><span>Exportação controlada dos dados centrais.</span></div>
+          <div class="arrow">·</div>
+          <div class="node purple wide"><strong>Backup</strong><span>Pasta <code>server/data</code> com o servidor interrompido.</span></div>
+        </div>
+      </div>
+    </div>
+    <footer><span>DuBrasil Soluções · R.E.I. · Documentação técnica</span><span>Página 1 de 1</span></footer>
+  </section>
+</body>
+</html>

@@ -1,0 +1,281 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <title>Guia do Sistema R.E.I.</title>
+  <style>
+    @page { size: A4; margin: 0; }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; background: #dfe5f0; color: #101a34; font-family: "Segoe UI", Arial, sans-serif; }
+    .page {
+      position: relative;
+      width: 210mm;
+      height: 297mm;
+      margin: 8mm auto;
+      padding: 18mm 17mm 19mm;
+      overflow: hidden;
+      background: #f7f9fd;
+      break-after: page;
+      page-break-after: always;
+    }
+    .page:last-child { break-after: auto; page-break-after: auto; }
+    .footer {
+      position: absolute;
+      left: 17mm;
+      right: 17mm;
+      bottom: 8mm;
+      display: flex;
+      justify-content: space-between;
+      border-top: 1px solid #d5ddec;
+      padding-top: 3mm;
+      color: #66728e;
+      font-size: 8.5pt;
+    }
+    .cover { background: linear-gradient(145deg, #111b3b 0%, #243d82 70%, #2a4d9a 100%); color: #fff; }
+    .cover .footer { color: #d8e0fa; border-color: rgba(255,255,255,.25); }
+    .brand { display: inline-flex; align-items: center; justify-content: center; width: 42mm; height: 42mm; background: #fff; border-radius: 50%; }
+    .brand img { width: 35mm; height: 35mm; object-fit: contain; border-radius: 50%; }
+    .cover-content { margin-top: 40mm; max-width: 155mm; }
+    .eyebrow { margin: 0 0 4mm; color: #61c5ef; font-size: 10pt; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }
+    h1 { margin: 0 0 6mm; font-size: 34pt; line-height: 1.05; }
+    .cover h2 { margin: 0; max-width: 145mm; color: #e7ecff; font-size: 17pt; font-weight: 500; line-height: 1.4; }
+    .cover-note { position: absolute; left: 17mm; bottom: 31mm; width: 150mm; color: #cbd6f8; font-size: 11pt; line-height: 1.5; }
+    .section-tag { color: #29458e; font-size: 9pt; font-weight: 800; letter-spacing: .1em; text-transform: uppercase; }
+    h2 { margin: 2mm 0 8mm; color: #142557; font-size: 24pt; line-height: 1.15; }
+    h3 { margin: 6mm 0 3mm; color: #203a7b; font-size: 14pt; }
+    p { margin: 0 0 4mm; font-size: 11pt; line-height: 1.48; }
+    ul, ol { margin: 2mm 0 5mm 6mm; padding-left: 5mm; }
+    li { margin: 0 0 2.4mm; font-size: 10.5pt; line-height: 1.38; }
+    .lead { color: #465572; font-size: 13pt; line-height: 1.5; }
+    .callout { margin: 7mm 0; padding: 5mm 6mm; border-left: 4px solid #55af49; border-radius: 0 4mm 4mm 0; background: #edf6ea; }
+    .callout strong { color: #285e24; }
+    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 5mm; }
+    .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4mm; }
+    .card { padding: 5mm; border: 1px solid #d7dfed; border-radius: 4mm; background: #fff; }
+    .card h3 { margin-top: 0; font-size: 13pt; }
+    .card p, .card li { font-size: 9.7pt; }
+    .number { display: flex; align-items: center; justify-content: center; width: 10mm; height: 10mm; margin-bottom: 3mm; border-radius: 50%; background: #29458e; color: #fff; font-weight: 800; }
+    .toc { list-style: none; margin: 10mm 0 0; padding: 0; }
+    .toc li { display: grid; grid-template-columns: auto 1fr auto; gap: 3mm; align-items: end; margin: 0 0 6mm; font-size: 12pt; }
+    .toc .dots { border-bottom: 1px dotted #8b96ac; transform: translateY(-1.5mm); }
+    .toc .page-no { color: #29458e; font-weight: 800; }
+    .flow { margin-top: 4mm; }
+    .flow-step { display: grid; grid-template-columns: 12mm 1fr; gap: 4mm; align-items: start; margin-bottom: 3.5mm; padding: 3.2mm 4mm; border-radius: 3mm; background: #fff; border: 1px solid #dde4f1; }
+    .flow-step .number { width: 9mm; height: 9mm; margin: 0; font-size: 9pt; }
+    .flow-step strong { display: block; margin-bottom: 1mm; color: #17316f; font-size: 10.5pt; }
+    .flow-step span { color: #52617e; font-size: 9.4pt; line-height: 1.3; }
+    .status { display: inline-block; margin: 0 1mm 1mm 0; padding: 1.5mm 3mm; border-radius: 10mm; background: #e9eef9; color: #203a7b; font-size: 9pt; font-weight: 700; }
+    .check { color: #399b36; font-weight: 900; }
+    .small { color: #66728e; font-size: 9.5pt; }
+    @media print {
+      html, body { background: #fff; }
+      .page { margin: 0; }
+      * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    }
+  </style>
+</head>
+<body>
+  <section class="page cover">
+    <div class="brand"><img src="../logo_dbs_app.png" alt="DuBrasil Soluções"></div>
+    <div class="cover-content">
+      <p class="eyebrow">Guia do sistema</p>
+      <h1>R.E.I.</h1>
+      <h2>Levantamento, acompanhamento e entrega de implantações ERP em um único processo.</h2>
+    </div>
+    <p class="cover-note">Um guia simples para entender o funcionamento do sistema, as responsabilidades de cada perfil e os ganhos para a empresa.</p>
+    <div class="footer"><span>DuBrasil Soluções · R.E.I.</span><span>Página 1 de 8</span></div>
+  </section>
+
+  <section class="page">
+    <span class="section-tag">Navegação</span>
+    <h2>Sumário</h2>
+    <p class="lead">As próximas páginas apresentam somente as informações necessárias para compreender e utilizar o R.E.I.</p>
+    <ol class="toc">
+      <li><span>1. O que é o R.E.I.</span><span class="dots"></span><span class="page-no">3</span></li>
+      <li><span>2. Perfis e responsabilidades</span><span class="dots"></span><span class="page-no">4</span></li>
+      <li><span>3. Fluxo completo de trabalho</span><span class="dots"></span><span class="page-no">5</span></li>
+      <li><span>4. Principais recursos</span><span class="dots"></span><span class="page-no">6</span></li>
+      <li><span>5. Trabalho offline e sincronização</span><span class="dots"></span><span class="page-no">7</span></li>
+      <li><span>6. Uso diário, segurança e suporte</span><span class="dots"></span><span class="page-no">8</span></li>
+    </ol>
+    <div class="callout"><strong>Documentação técnica:</strong> instalação, arquitetura, banco, API e comandos de manutenção permanecem no arquivo <code>README.md</code> do projeto.</div>
+    <div class="footer"><span>Guia do Sistema R.E.I.</span><span>Página 2 de 8</span></div>
+  </section>
+
+  <section class="page">
+    <span class="section-tag">1 · Visão geral</span>
+    <h2>O que é o R.E.I.</h2>
+    <p class="lead">É o sistema que acompanha uma implantação desde a coleta das informações do cliente até a avaliação final do trabalho entregue.</p>
+    <div class="callout"><strong>Objetivo:</strong> substituir informações dispersas por um processo único, padronizado, rastreável e fácil de consultar.</div>
+    <h3>O que fica centralizado</h3>
+    <div class="grid-2">
+      <div class="card"><h3>Dados do cliente</h3><p>Informações básicas, responsável, datas e módulos contratados.</p></div>
+      <div class="card"><h3>Levantamento</h3><p>Necessidades, processos e particularidades identificadas antes da implantação.</p></div>
+      <div class="card"><h3>Entrega</h3><p>Atividades executadas, observações, evidências e situação final.</p></div>
+      <div class="card"><h3>Comprovação</h3><p>Fotos, assinaturas, PDFs e avaliação da supervisão.</p></div>
+    </div>
+    <h3>Vantagens para a empresa</h3>
+    <ul>
+      <li><span class="check">✓</span> Padroniza a execução entre diferentes implantadores.</li>
+      <li><span class="check">✓</span> Reduz esquecimentos e retrabalho.</li>
+      <li><span class="check">✓</span> Mantém histórico por cliente e responsável.</li>
+      <li><span class="check">✓</span> Facilita acompanhamento, auditoria e reimpressão.</li>
+      <li><span class="check">✓</span> Cria uma base central para indicadores e BI.</li>
+    </ul>
+    <div class="footer"><span>Guia do Sistema R.E.I.</span><span>Página 3 de 8</span></div>
+  </section>
+
+  <section class="page">
+    <span class="section-tag">2 · Acessos</span>
+    <h2>Perfis e responsabilidades</h2>
+    <div class="grid-2">
+      <div class="card">
+        <h3>Supervisor</h3>
+        <ul>
+          <li>acompanha levantamentos e implantações;</li>
+          <li>cadastra clientes e define responsáveis;</li>
+          <li>gerencia usuários e itens dos relatórios;</li>
+          <li>visualiza e reimprime documentos concluídos;</li>
+          <li>avalia a implantação depois da conclusão.</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>Implantador</h3>
+        <ul>
+          <li>recebe ou cria levantamentos;</li>
+          <li>agenda e preenche a coleta de dados;</li>
+          <li>preenche e salva o R.E.I.;</li>
+          <li>anexa fotos e coleta assinaturas;</li>
+          <li>conclui, imprime e acompanha avaliações.</li>
+        </ul>
+      </div>
+    </div>
+    <h3>Regras que preservam o processo</h3>
+    <div class="flow">
+      <div class="flow-step"><span class="number">1</span><div><strong>Levantamento concluído</strong><span>Fica disponível somente para consulta e impressão.</span></div></div>
+      <div class="flow-step"><span class="number">2</span><div><strong>R.E.I. em andamento</strong><span>Pode ser salvo e continuado posteriormente pelo implantador responsável.</span></div></div>
+      <div class="flow-step"><span class="number">3</span><div><strong>Relatório em PDF</strong><span>Só é liberado depois que a implantação é marcada como concluída.</span></div></div>
+      <div class="flow-step"><span class="number">4</span><div><strong>Avaliação da supervisão</strong><span>Só aparece após a conclusão e não pode ser editada depois do envio.</span></div></div>
+    </div>
+    <div class="callout"><strong>Resultado:</strong> cada pessoa vê as informações e ações compatíveis com sua responsabilidade.</div>
+    <div class="footer"><span>Guia do Sistema R.E.I.</span><span>Página 4 de 8</span></div>
+  </section>
+
+  <section class="page">
+    <span class="section-tag">3 · Processo</span>
+    <h2>Fluxo completo de trabalho</h2>
+    <div class="flow">
+      <div class="flow-step"><span class="number">1</span><div><strong>Cadastro do cliente</strong><span>O supervisor registra as informações básicas e indica o implantador responsável.</span></div></div>
+      <div class="flow-step"><span class="number">2</span><div><strong>Agendamento</strong><span>O implantador define data e horário. O Android avisa 30 minutos antes.</span></div></div>
+      <div class="flow-step"><span class="number">3</span><div><strong>Levantamento de dados</strong><span>O formulário é preenchido em etapas, com campos adequados a cada informação.</span></div></div>
+      <div class="flow-step"><span class="number">4</span><div><strong>Conclusão do levantamento</strong><span>O documento é bloqueado para edição, pode ser impresso e libera o R.E.I.</span></div></div>
+      <div class="flow-step"><span class="number">5</span><div><strong>Execução da implantação</strong><span>O implantador registra atividades técnicas, estoque, financeiro, fiscal e entrega.</span></div></div>
+      <div class="flow-step"><span class="number">6</span><div><strong>Evidências e aceite</strong><span>Fotos, observações e assinaturas comprovam o que foi entregue.</span></div></div>
+      <div class="flow-step"><span class="number">7</span><div><strong>Conclusão e PDF</strong><span>O relatório final é liberado para compartilhamento e reimpressão.</span></div></div>
+      <div class="flow-step"><span class="number">8</span><div><strong>Avaliação</strong><span>O supervisor atribui nota, checklist e parecer; o implantador acompanha o resultado.</span></div></div>
+    </div>
+    <p class="small">O levantamento e a implantação utilizam o mesmo registro. A mudança de etapa evita duplicidade de clientes e mantém o histórico conectado.</p>
+    <div class="footer"><span>Guia do Sistema R.E.I.</span><span>Página 5 de 8</span></div>
+  </section>
+
+  <section class="page">
+    <span class="section-tag">4 · Recursos</span>
+    <h2>Principais recursos</h2>
+    <div class="grid-3">
+      <div class="card"><h3>Dashboards</h3><p>Cards, listas e gráficos separados para levantamentos e implantações.</p></div>
+      <div class="card"><h3>Formulários</h3><p>Etapas claras, progresso visível e salvamento para continuar depois.</p></div>
+      <div class="card"><h3>Campos flexíveis</h3><p>Texto, escolha, número, e-mail, data, horário e foto.</p></div>
+      <div class="card"><h3>Evidências</h3><p>Câmera, galeria, anexos de imagem e assinaturas na tela.</p></div>
+      <div class="card"><h3>PDF</h3><p>Documentos padronizados com dados, fotos, assinaturas e avaliação.</p></div>
+      <div class="card"><h3>Aparência</h3><p>Tema claro ou escuro escolhido pelo usuário.</p></div>
+    </div>
+    <h3>Organização das informações</h3>
+    <p><span class="status">Levantamentos pendentes</span><span class="status">Levantamentos concluídos</span></p>
+    <p><span class="status">Implantações pendentes</span><span class="status">Em andamento</span><span class="status">Concluídas</span></p>
+    <h3>PDFs gerados</h3>
+    <div class="grid-2">
+      <div class="card"><h3>Levantamento</h3><p>Apresenta os dados coletados e as imagens anexadas. Depois da conclusão, permanece somente para impressão.</p></div>
+      <div class="card"><h3>R.E.I.</h3><p>Apresenta a implantação completa, assinaturas, evidências e avaliação da supervisão.</p></div>
+    </div>
+    <div class="callout"><strong>Personalização:</strong> o supervisor pode criar novos tópicos e campos. As alterações são sincronizadas com o aplicativo Android.</div>
+    <div class="footer"><span>Guia do Sistema R.E.I.</span><span>Página 6 de 8</span></div>
+  </section>
+
+  <section class="page">
+    <span class="section-tag">5 · Mobilidade</span>
+    <h2>Trabalho offline e sincronização</h2>
+    <p class="lead">O aplicativo Android permite trabalhar em campo mesmo quando o computador do escritório não está acessível.</p>
+    <div class="grid-2">
+      <div class="card">
+        <h3>No escritório</h3>
+        <ol>
+          <li>conectar ao Wi-Fi;</li>
+          <li>fazer o primeiro login;</li>
+          <li>receber usuários, registros e campos;</li>
+          <li>enviar os trabalhos pendentes.</li>
+        </ol>
+      </div>
+      <div class="card">
+        <h3>Em campo</h3>
+        <ol>
+          <li>entrar com o acesso já liberado;</li>
+          <li>preencher e salvar normalmente;</li>
+          <li>manter os dados no banco do celular;</li>
+          <li>sincronizar ao retornar ao Wi-Fi.</li>
+        </ol>
+      </div>
+    </div>
+    <div class="callout"><strong>Importante:</strong> cada usuário precisa fazer pelo menos um login conectado ao servidor naquele aparelho. A troca de senha também precisa de conexão.</div>
+    <h3>Por que o 5G não acessa o computador?</h3>
+    <p>O servidor está dentro da rede do escritório. O 5G utiliza outra rede e não alcança diretamente o endereço local do computador.</p>
+    <p>O modo padrão é preencher offline e sincronizar no Wi-Fi. Para acesso externo contínuo, a empresa deve implantar uma VPN ou túnel HTTPS com acompanhamento técnico.</p>
+    <h3>Notificações</h3>
+    <ul>
+      <li>novo levantamento ou R.E.I. recebido;</li>
+      <li>levantamento agendado em 30 minutos;</li>
+      <li>lembretes de R.E.I. às 10h30 e 16h30;</li>
+      <li>avaliação pendente para o supervisor.</li>
+    </ul>
+    <div class="footer"><span>Guia do Sistema R.E.I.</span><span>Página 7 de 8</span></div>
+  </section>
+
+  <section class="page">
+    <span class="section-tag">6 · Operação</span>
+    <h2>Uso diário, segurança e suporte</h2>
+    <h3>Rotina recomendada</h3>
+    <ol>
+      <li>manter o computador e o servidor do escritório ligados;</li>
+      <li>confirmar a sincronização dos aparelhos no Wi-Fi;</li>
+      <li>acompanhar pendências pelos cards do dashboard;</li>
+      <li>concluir documentos somente depois da conferência;</li>
+      <li>fazer backup periódico dos dados centrais.</li>
+    </ol>
+    <div class="grid-2">
+      <div class="card">
+        <h3>Cuidados de segurança</h3>
+        <ul>
+          <li>não compartilhar senhas;</li>
+          <li>desativar acessos não utilizados;</li>
+          <li>proteger fotos, assinaturas e backups;</li>
+          <li>não publicar o banco ou configurações;</li>
+          <li>usar conexão segura para acesso externo.</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>Se algo não sincronizar</h3>
+        <ul>
+          <li>confirmar o Wi-Fi do escritório;</li>
+          <li>verificar se o servidor está ligado;</li>
+          <li>conferir o endereço na engrenagem;</li>
+          <li>abrir o aplicativo novamente;</li>
+          <li>não apagar o app antes de recuperar os dados.</li>
+        </ul>
+      </div>
+    </div>
+    <div class="callout"><strong>Backup:</strong> a cópia principal deve incluir a pasta <code>server/data</code> e a configuração do servidor. O banco de um celular não substitui o backup central.</div>
+    <h3>Resultado para a empresa</h3>
+    <p>Com o R.E.I., a implantação deixa de ser apenas um conjunto de anotações e passa a ser um processo documentado, mensurável e disponível para consulta. Isso melhora o controle, a comunicação com o cliente e a qualidade das próximas entregas.</p>
+    <div class="footer"><span>Guia do Sistema R.E.I.</span><span>Página 8 de 8</span></div>
+  </section>
+</body>
+</html>

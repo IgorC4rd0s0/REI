@@ -4,6 +4,12 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 data class ChecklistGroup(val title: String, val items: List<String>)
+data class DynamicReiField(
+    val label: String,
+    val type: String = "text",
+    val options: List<String> = emptyList()
+)
+data class DynamicReiGroup(val title: String, val fields: List<DynamicReiField>)
 data class SurveyFieldSchema(
     val key: String,
     val label: String,
@@ -20,6 +26,7 @@ data class SchemaOverrides(
     val finance: List<ChecklistGroup> = emptyList(),
     val fiscalReports: List<ChecklistGroup> = emptyList(),
     val supervision: List<ChecklistGroup> = emptyList(),
+    val reiFields: Map<String, List<DynamicReiGroup>> = emptyMap(),
     val surveySections: List<SurveySectionSchema> = emptyList()
 ) {
     companion object {
@@ -34,6 +41,13 @@ data class SchemaOverrides(
                 finance = rei.optGroups("finance"),
                 fiscalReports = rei.optGroups("fiscal"),
                 supervision = rei.optGroups("supervision"),
+                reiFields = mapOf(
+                    "tecnico" to rei.optDynamicGroups("technical"),
+                    "estoque" to rei.optDynamicGroups("stock"),
+                    "financeiro" to rei.optDynamicGroups("finance"),
+                    "fiscal" to rei.optDynamicGroups("fiscal"),
+                    "supervisao" to rei.optDynamicGroups("supervision")
+                ),
                 surveySections = root.optSurveySections("levantamento")
             )
         }
@@ -41,7 +55,10 @@ data class SchemaOverrides(
         private fun JSONObject.optStringList(key: String): List<String> {
             val array = optJSONArray(key) ?: return emptyList()
             return (0 until array.length()).mapNotNull { index ->
-                array.optString(index).trim().takeIf { it.isNotBlank() }
+                when (val item = array.opt(index)) {
+                    is JSONObject -> item.optString("label").trim().takeIf { it.isNotBlank() }
+                    else -> item?.toString()?.trim()?.takeIf { it.isNotBlank() }
+                }
             }
         }
 
@@ -51,7 +68,39 @@ data class SchemaOverrides(
                 val group = array.optJSONObject(index) ?: return@mapNotNull null
                 val title = group.optString("title").trim()
                 if (title.isBlank()) return@mapNotNull null
-                ChecklistGroup(title, group.optStringList("items"))
+                val itemsArray = group.optJSONArray("items") ?: JSONArray()
+                val items = (0 until itemsArray.length()).mapNotNull { itemIndex ->
+                    val item = itemsArray.opt(itemIndex)
+                    if (item is JSONObject && item.optString("type").equals("checkbox", ignoreCase = true)) {
+                        item.optString("label").trim().takeIf { it.isNotBlank() }
+                    } else null
+                }
+                ChecklistGroup(title, items)
+            }
+        }
+
+        private fun JSONObject.optDynamicGroups(key: String): List<DynamicReiGroup> {
+            val array = optJSONArray(key) ?: return emptyList()
+            return (0 until array.length()).mapNotNull { index ->
+                val group = array.optJSONObject(index) ?: return@mapNotNull null
+                val title = group.optString("title").trim()
+                if (title.isBlank()) return@mapNotNull null
+                val items = group.optJSONArray("items") ?: JSONArray()
+                val fields = (0 until items.length()).mapNotNull { itemIndex ->
+                    val rawItem = items.opt(itemIndex)
+                    val item = rawItem as? JSONObject
+                    val label = if (item != null) item.optString("label").trim()
+                    else rawItem?.toString()?.trim().orEmpty()
+                    if (label.isBlank()) return@mapNotNull null
+                    val type = item?.optString("type", "text")?.ifBlank { "text" } ?: "text"
+                    if (type.equals("checkbox", ignoreCase = true)) return@mapNotNull null
+                    DynamicReiField(
+                        label = label,
+                        type = type,
+                        options = item?.optStringList("options").orEmpty()
+                    )
+                }
+                DynamicReiGroup(title, fields)
             }
         }
 
@@ -199,8 +248,10 @@ object ReportSchema {
     )
     val supervision: List<ChecklistGroup> get() = mergeGroups(baseSupervision, overrides.supervision)
     val surveySections: List<SurveySectionSchema> get() = overrides.surveySections
+    fun dynamicFields(scope: String): List<DynamicReiGroup> = overrides.reiFields[scope].orEmpty()
 
     fun key(scope: String, group: String, item: String) = "$scope::$group::$item"
+    fun fieldKey(scope: String, group: String, item: String) = "reiField::$scope::$group::$item"
     fun contractedKey(item: String) = key("dados", "modulos", item)
 
     fun allChecklistItems(): List<String> =

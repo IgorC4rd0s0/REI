@@ -2,7 +2,45 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const app = $("#app");
 const S = window.REI_SCHEMA;
-const state = { token: localStorage.reiToken || "", user: null, reports: [], users: [], view: "login", editing: null, step: 0, surveyStep: 0, dashboardFilter: "levantamentos", schemaLoaded: false };
+const state = {
+  token: localStorage.reiToken || "",
+  user: null,
+  reports: [],
+  users: [],
+  view: "login",
+  editing: null,
+  step: 0,
+  surveyStep: 0,
+  dashboardFilter: "levantamentos",
+  dashboardArea: "home",
+  viewingSurveyReadOnly: false,
+  schemaLoaded: false
+};
+const THEME_MODES = new Set(["system", "light", "dark"]);
+
+function storedThemeMode() {
+  const userKey = state.user?.username ? `reiTheme:${state.user.username}` : "";
+  const value = (userKey && localStorage.getItem(userKey)) || localStorage.getItem("reiTheme") || "system";
+  return THEME_MODES.has(value) ? value : "system";
+}
+
+function applyTheme(mode = storedThemeMode(), persist = false) {
+  const selected = THEME_MODES.has(mode) ? mode : "system";
+  if (persist) {
+    localStorage.setItem("reiTheme", selected);
+    if (state.user?.username) localStorage.setItem(`reiTheme:${state.user.username}`, selected);
+  }
+  const dark = selected === "dark" || (selected === "system" && matchMedia("(prefers-color-scheme: dark)").matches);
+  document.documentElement.dataset.theme = dark ? "dark" : "light";
+  document.documentElement.dataset.themeMode = selected;
+  document.documentElement.style.colorScheme = dark ? "dark" : "light";
+}
+
+const systemThemeQuery = matchMedia("(prefers-color-scheme: dark)");
+systemThemeQuery.addEventListener?.("change", () => {
+  if (storedThemeMode() === "system") applyTheme("system");
+});
+applyTheme();
 const steps = [
   ["Identificação", "ident"], ["Técnico", "technical"], ["Estoque", "stock"],
   ["Financeiro", "finance"], ["Fiscal", "fiscal"], ["Entrega", "delivery"]
@@ -78,7 +116,8 @@ function icon(name) {
     pie: '<path d="M21 12a9 9 0 1 1-9-9v9z"/><path d="M12 3a9 9 0 0 1 9 9h-9z"/>',
     clipboard: '<rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><path d="M8 13h8"/><path d="M8 17h5"/>',
     file: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M8 13h8"/><path d="M8 17h5"/>',
-    check: '<path d="M20 6L9 17l-5-5"/>'
+    check: '<path d="M20 6L9 17l-5-5"/>',
+    settings: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.03 1.55V21h-4v-.08A1.7 1.7 0 0 0 9 19.37a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.63 15 1.7 1.7 0 0 0 3.08 14H3v-4h.08A1.7 1.7 0 0 0 4.63 9a1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.63h.01A1.7 1.7 0 0 0 10 3.08V3h4v.08A1.7 1.7 0 0 0 15 4.63a1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.37 9c.2.61.77 1.02 1.55 1.02H21v4h-.08A1.7 1.7 0 0 0 19.4 15z"/>'
   };
   return `<svg class="ico" viewBox="0 0 24 24" aria-hidden="true">${paths[name] || paths.file}</svg>`;
 }
@@ -95,11 +134,28 @@ function api(path, options = {}) {
   });
 }
 function sameText(a, b) {
-  return String(a || "").trim().toLowerCase() === String(b || "").trim().toLowerCase();
+  return schemaItemLabel(a).toLowerCase() === schemaItemLabel(b).toLowerCase();
 }
+function schemaItemLabel(item) { return String(item && typeof item === "object" ? item.label : item || "").trim(); }
+function schemaItemType(item) { return item && typeof item === "object" ? String(item.type || "text") : "checkbox"; }
+function schemaItemOptions(item) { return item && typeof item === "object" && Array.isArray(item.options) ? item.options : []; }
+function schemaFieldKey(scope, group, item) { return `reiField::${scope}::${group}::${schemaItemLabel(item)}`; }
 function appendUniqueText(list, value) {
-  const clean = String(value || "").trim();
-  if (clean && !list.some(item => sameText(item, clean))) list.push(clean);
+  const clean = schemaItemLabel(value);
+  if (!clean) return;
+  const existingIndex = list.findIndex(item => sameText(item, clean));
+  const normalized = value && typeof value === "object"
+    ? { label: clean, type: String(value.type || "text"), options: schemaItemOptions(value) }
+    : clean;
+  if (existingIndex < 0) {
+    list.push(normalized);
+    return;
+  }
+  // A definição tipada do servidor deve substituir itens legados em texto puro.
+  // Caso contrário, um campo "text" antigo continua sendo exibido como checkbox.
+  if (normalized && typeof normalized === "object" && typeof list[existingIndex] !== "object") {
+    list[existingIndex] = normalized;
+  }
 }
 function appendSchemaGroup(areaList, title, items = []) {
   const cleanTitle = String(title || "").trim();
@@ -115,17 +171,25 @@ function appendSurveyField(sectionFields, field) {
   const key = String(field?.key || "").trim();
   const label = String(field?.label || "").trim();
   const type = String(field?.type || "text").trim();
-  if (!key || !label || sectionFields.some(([existingKey]) => existingKey === key)) return;
-  if (type === "choice") sectionFields.push([key, label, "choice", Array.isArray(field.options) && field.options.length ? field.options : ["Sim", "Não"]]);
-  else if (type === "textarea") sectionFields.push([key, label, "textarea", 3]);
-  else sectionFields.push([key, label, type]);
+  if (!key || !label) return;
+  let normalized;
+  if (type === "choice") normalized = [key, label, "choice", Array.isArray(field.options) && field.options.length ? field.options : ["Sim", "Não"]];
+  else if (type === "textarea") normalized = [key, label, "textarea", 3];
+  else normalized = [key, label, type];
+  const existingIndex = sectionFields.findIndex(([existingKey]) => existingKey === key);
+  if (existingIndex >= 0) sectionFields[existingIndex] = normalized;
+  else sectionFields.push(normalized);
 }
 function applySchemaOverrides(overrides) {
   if (!overrides || typeof overrides !== "object") return;
   const rei = overrides.rei || {};
   (rei.modules || []).forEach(item => appendUniqueText(S.modules, item));
   ["technical", "stock", "finance", "fiscal", "supervision"].forEach(area => {
-    (rei[area] || []).forEach(group => appendSchemaGroup(S[area], group.title, group.items || []));
+    (rei[area] || []).forEach(group => appendSchemaGroup(
+      S[area],
+      group.title,
+      (group.items || []).map(item => item && typeof item === "object" ? item : { label: item, type: "text" })
+    ));
   });
   (overrides.levantamento || []).forEach(section => {
     const title = String(section?.title || "").trim();
@@ -158,6 +222,7 @@ function blankReport() {
 }
 function field(report, key) { return report?.report?.fields?.[key] || ""; }
 function stage(report) { return field(report, "_stage") || "rei"; }
+function surveyCompletedAt(report) { return Number(field(report, "_surveyCompletedAt")) || report?.completed_at || report?.completedAt || 0; }
 function reportPdfTitle(report) {
   const prefix = ["levantamento_pendente", "rei_pendente"].includes(stage(report)) ? "Levantamento de Dados" : "Relatorio de Entrega";
   const client = String(report?.client || field(report, "cliente") || "Cliente")
@@ -177,6 +242,43 @@ function score(report) {
 function hasEvaluation(report) {
   const checks = new Set(report?.report?.checks || []);
   return !!(report?.report?.rating || field(report, "_supervisionScore") || S.supervisionKeys().some(k => checks.has(k)));
+}
+function pendingSupervisorEvaluations() {
+  if (state.user?.role !== "supervisor") return [];
+  return state.reports.filter(report =>
+    !["levantamento_pendente", "rei_pendente"].includes(stage(report)) &&
+    isReadyForSupervisorEvaluation(report) &&
+    !hasEvaluation(report)
+  );
+}
+function localDayStamp(date = new Date()) {
+  const part = value => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${part(date.getMonth() + 1)}-${part(date.getDate())}`;
+}
+function showDailyEvaluationReminder() {
+  const pending = pendingSupervisorEvaluations();
+  if (!pending.length) return;
+  const username = String(state.user?.username || "supervisor").toLowerCase();
+  const storageKey = `reiEvaluationReminder:${username}`;
+  const today = localDayStamp();
+  if (localStorage.getItem(storageKey) === today) return;
+  localStorage.setItem(storageKey, today);
+  const first = pending[0];
+  const clients = pending.slice(0, 3).map(report => `<li>${esc(report.client || field(report, "cliente") || "Cliente não informado")}</li>`).join("");
+  const remaining = pending.length > 3 ? `<li>e mais ${pending.length - 3} implantação(ões)</li>` : "";
+  document.body.insertAdjacentHTML("beforeend", `<div class="modal no-print evaluation-reminder" role="alertdialog" aria-modal="true" aria-labelledby="evaluationReminderTitle">
+    <section class="card evaluation-reminder-card">
+      <div class="evaluation-reminder-icon">${icon("star")}</div>
+      <h2 id="evaluationReminderTitle">Avaliações pendentes</h2>
+      <p>Existem <strong>${pending.length}</strong> implantação(ões) concluída(s) aguardando sua avaliação.</p>
+      <ul>${clients}${remaining}</ul>
+      <p class="muted">Este aviso será apresentado no primeiro acesso de cada dia até que todas sejam avaliadas.</p>
+      <div class="row evaluation-reminder-actions">
+        <button class="btn secondary" data-action="close-modal">Lembrar amanhã</button>
+        <button class="btn green" data-action="open-evaluation-reminder" data-id="${esc(first.id)}">${icon("star")}Avaliar agora</button>
+      </div>
+    </section>
+  </div>`);
 }
 function isReadyForSupervisorEvaluation(report) {
   return String(report?.delivery_status || report?.report?.deliveryStatus || "")
@@ -217,10 +319,46 @@ function shell(content) {
       <div class="spacer"></div>
       ${state.user ? `<span class="pill">${esc(role)} · ${esc(state.user.fullName || state.user.username)}</span>
       ${state.user.role === "supervisor" ? `<a class="btn secondary" href="/admin">${icon("users")}Usuários</a>` : ""}
-      <button class="btn danger" data-action="logout">${icon("logout")}Sair</button>` : ""}
+      ${state.user.role === "supervisor" ? `<a class="btn secondary topbar-btn" href="/admin/items">${icon("clipboard")}Itens dos relatórios</a>` : ""}
+      <button class="btn secondary" data-action="settings" title="Configurações da conta" aria-label="Configurações da conta">${icon("settings")}</button>` : ""}
     </header>
     <main class="container">${content}</main>
   </div>`;
+}
+
+function renderAccountSettings() {
+  const currentTheme = storedThemeMode();
+  document.body.insertAdjacentHTML("beforeend", `<div class="modal no-print" role="dialog" aria-modal="true" aria-labelledby="accountSettingsTitle">
+    <section class="card account-settings-card">
+      <div class="row"><div><h2 id="accountSettingsTitle">Configurações da conta</h2><p class="muted">Personalize a aparência e altere sua senha pessoal.</p></div><div class="spacer"></div><button class="btn secondary" data-action="close-modal">Fechar</button></div>
+      <div class="theme-settings">
+        <h3>Tema do sistema</h3><p class="muted">Escolha a aparência que deseja utilizar em todas as telas.</p>
+        <div class="theme-options" role="radiogroup" aria-label="Tema do sistema">
+          ${[["system","Sistema"],["light","Claro"],["dark","Escuro"]].map(([value,label]) => `<button type="button" class="theme-option ${currentTheme === value ? "active" : ""}" data-action="theme" data-theme-mode="${value}" role="radio" aria-checked="${currentTheme === value}">${label}</button>`).join("")}
+        </div>
+      </div>
+      <form id="changePasswordForm">
+        <div class="field"><label>Senha atual</label><input name="currentPassword" type="password" autocomplete="current-password" required></div>
+        <div class="form-grid">
+          <div class="field"><label>Nova senha</label><input name="newPassword" type="password" minlength="8" autocomplete="new-password" required><small class="muted">Mínimo de 8 caracteres.</small></div>
+          <div class="field"><label>Confirmar nova senha</label><input name="confirmation" type="password" minlength="8" autocomplete="new-password" required></div>
+        </div>
+        <div class="row"><button class="btn" type="submit">Alterar minha senha</button><div class="spacer"></div><button class="btn danger" type="button" data-action="logout">${icon("logout")}Sair do sistema</button></div>
+      </form>
+    </section>
+  </div>`);
+  $("#changePasswordForm").onsubmit = async event => {
+    event.preventDefault();
+    const payload = Object.fromEntries(new FormData(event.currentTarget));
+    if (payload.newPassword !== payload.confirmation) return alert("A confirmação da nova senha não confere.");
+    try {
+      await api("/api/auth/change-password", { method: "POST", body: JSON.stringify(payload) });
+      $(".modal")?.remove();
+      alert("Senha alterada com sucesso.");
+    } catch (error) {
+      alert(error.message || "Não foi possível alterar a senha.");
+    }
+  };
 }
 
 function renderLogin(error = "") {
@@ -243,13 +381,15 @@ function renderLogin(error = "") {
     try {
       const res = await api("/api/auth/login", { method: "POST", body: JSON.stringify(form) });
       state.token = res.token; state.user = res.user; localStorage.reiToken = res.token;
-      await loadSchemaOverrides(); await loadUsers(); await loadReports(); renderDashboard();
+      applyTheme(storedThemeMode());
+      state.dashboardArea = "home";
+      state.dashboardFilter = "levantamentos";
+      await loadSchemaOverrides(); await loadUsers(); await loadReports(); renderDashboard(); showDailyEvaluationReminder();
     } catch (err) { renderLogin(err.message); }
   };
 }
 
 async function loadMe() {
-  if (!state.token) return false;
   try { state.user = (await api("/api/auth/me")).user; return true; }
   catch { localStorage.removeItem("reiToken"); state.token = ""; return false; }
 }
@@ -271,7 +411,101 @@ function isAssignedToCurrentUser(r) {
   return !assigned || assigned === String(state.user?.username || "").trim().toLowerCase();
 }
 
+function reportScope() {
+  const reports = [...state.reports].sort((a, b) => (b.completed_at || 0) - (a.completed_at || 0));
+  if (state.user?.role === "supervisor") return reports;
+  return reports.filter(isAssignedToCurrentUser);
+}
+
+function renderDashboardHome() {
+  const reports = state.reports;
+  const scoped = reportScope();
+  const surveys = scoped.filter(r => ["levantamento_pendente", "rei_pendente"].includes(stage(r)));
+  const implementations = scoped.filter(r => stage(r) !== "levantamento_pendente");
+  const roleTitle = state.user?.role === "supervisor" ? "Área do supervisor" : "Área do implantador";
+  shell(`<section class="hero hub-hero">
+      <h1>${roleTitle}</h1>
+      <p>Escolha abaixo se deseja trabalhar com implantações R.E.I. ou levantamentos de dados.</p>
+    </section>
+    <section class="hub-actions">
+      <button class="card hub-card" data-action="dashboard-area" data-area="implantacoes">
+        <span class="metric-icon">${icon("briefcase")}</span>
+        <strong>Implantação</strong>
+        <small>Dashboard, informações das implantações, relatórios e avaliações recebidas.</small>
+        <b>${implementations.length}</b>
+      </button>
+      <button class="card hub-card" data-action="dashboard-area" data-area="levantamentos">
+        <span class="metric-icon">${icon("file")}</span>
+        <strong>Levantamentos</strong>
+        <small>Tela dedicada para visualizar, iniciar e preencher levantamentos pendentes.</small>
+        <b>${surveys.length}</b>
+      </button>
+    </section>
+    <div class="section-title"><h2>Resumo rápido</h2></div>
+    <section class="grid metrics">
+      ${metric("Implantações", implementations.length, "briefcase")}
+      ${metric("Levantamentos", surveys.length, "file")}
+      ${metric("Avaliações", reports.filter(hasEvaluation).length, "star")}
+      ${metric("Última entrega", implementations[0] ? fmtDate(implementations[0].completed_at) : "-", "calendar")}
+    </section>
+    <div class="section-title"><h2>Gráficos separados</h2></div>
+    <section class="grid charts-grid">
+      ${monthlyChart(implementations, "Implantações por mês")}
+      ${monthlyChart(surveys, "Levantamentos por mês")}
+    </section>`);
+}
+
+function renderDashboardArea() {
+  const reports = reportScope();
+  const isSurveyArea = state.dashboardArea === "levantamentos";
+  const surveys = reports.filter(r => stage(r) === "levantamento_pendente");
+  const completedSurveys = reports.filter(r => stage(r) === "rei_pendente").sort((a, b) => surveyCompletedAt(b) - surveyCompletedAt(a));
+  const allSurveys = surveys.concat(completedSurveys);
+  const reiPending = reports.filter(r => stage(r) === "rei_pendente");
+  const reiReports = reports.filter(r => !["levantamento_pendente", "rei_pendente"].includes(stage(r)));
+  const inProgress = reiReports.filter(r => !isReadyForSupervisorEvaluation(r));
+  const concluded = reiReports.filter(isReadyForSupervisorEvaluation);
+  const evaluations = reiReports.filter(hasEvaluation);
+  const avgDays = concluded.map(implementationDurationDays).filter(v => v !== null);
+  const avgScore = evaluations.map(score).filter(v => v !== null);
+  const groups = isSurveyArea
+    ? [
+        { key: "levantamentos", title: "Levantamentos pendentes", value: surveys.length, subtitle: "Disponíveis para preencher", icon: "file", items: surveys, emptyText: "Nenhum levantamento pendente." },
+        { key: "levantamentos_concluidos", title: "Levantamentos concluídos", value: completedSurveys.length, subtitle: "Somente visualização e impressão", icon: "calendar", items: completedSurveys, emptyText: "Nenhum levantamento concluído." }
+      ]
+    : [
+        { key: "pendentes", title: "Implantações pendentes", value: reiPending.length, subtitle: "R.E.I. liberado para iniciar", icon: "briefcase", items: reiPending, emptyText: "Nenhuma implantação pendente para iniciar o R.E.I." },
+        { key: "andamento", title: "Implantações em andamento", value: inProgress.length, subtitle: "Iniciadas e ainda não concluídas", icon: "timer", items: inProgress, emptyText: "Nenhuma implantação em andamento." },
+        { key: "concluidas", title: "Implantações concluídas", value: concluded.length, subtitle: "Disponíveis para visualização/PDF", icon: "calendar", items: concluded, emptyText: "Nenhuma implantação concluída." }
+      ];
+  if (!groups.some(group => group.key === state.dashboardFilter)) state.dashboardFilter = groups[0].key;
+  const activeGroup = groups.find(group => group.key === state.dashboardFilter) || groups[0];
+  shell(`<section class="hero area-hero">
+      <button class="btn secondary area-back" data-action="dashboard-home">${icon("home")}Voltar</button>
+      <h1>${isSurveyArea ? "Levantamentos" : "Implantação"}</h1>
+      <p>${isSurveyArea ? "Dashboard e informações dos levantamentos destinados ao implantador." : "Dashboard, informações das implantações e avaliação das implantações entregues."}</p>
+    </section>
+    <section class="grid metrics">
+      ${isSurveyArea
+        ? `${metric("Levantamentos pendentes", surveys.length, "file")}${metric("Levantamentos concluídos", completedSurveys.length, "calendar")}${metric("Último levantamento", completedSurveys[0] ? fmtDate(surveyCompletedAt(completedSurveys[0])) : "-", "calendar")}`
+        : `${metric("Implantações", reiPending.length + reiReports.length, "briefcase")}${metric("Média de dias gastos", avgDays.length ? `${(avgDays.reduce((a,b)=>a+b,0)/avgDays.length).toFixed(1)} dias` : "-", "timer")}${metric("Nota média", avgScore.length ? `${(avgScore.reduce((a,b)=>a+b,0)/avgScore.length).toFixed(1)}/10` : "-", "star")}${metric("Última entrega", reiReports[0] ? fmtDate(reiReports[0].completed_at) : "-", "calendar")}`}
+    </section>
+    <div class="section-title"><h2>Dashboard e informações ${isSurveyArea ? "dos levantamentos" : "das implantações"}</h2></div>
+    <section class="grid workflow-cards">${groups.map(group => workflowCard(group, group.key === activeGroup.key)).join("")}</section>
+    ${reportSection(activeGroup.title, activeGroup.items, activeGroup.emptyText, activeGroup.subtitle, activeGroup.key === "levantamentos_concluidos" ? "open-survey-completed" : "open")}
+    <div class="section-title"><h2>Gráficos</h2></div>
+    <section class="grid charts-grid">
+      ${isSurveyArea ? `${monthlyChart(allSurveys, "Levantamentos por mês")}${statusChart(allSurveys, "Situação dos levantamentos")}` : `${monthlyChart(reiPending.concat(reiReports), "Implantações por mês")}${statusChart(reiReports, "Situação das implantações")}`}
+    </section>
+    ${!isSurveyArea ? `<div class="section-title"><h2>Avaliação das implantações</h2></div>${latestEvaluations(evaluations.slice(0,3))}` : ""}
+    ${(state.user.role === "supervisor" && isSurveyArea) || state.user.role !== "supervisor" ? `<div class="footer-actions no-print">
+      ${isSurveyArea ? (state.user.role === "supervisor" ? `<button class="btn" data-action="new-client">${icon("plus")}Cadastrar cliente</button>` : `<button class="btn secondary" data-action="new-survey">${icon("file")}Novo levantamento</button>`) : `<button class="btn" data-action="new">${icon("plus")}Nova implantação</button>`}
+    </div>` : ""}`);
+}
+
 function renderDashboard() {
+  if (state.dashboardArea === "home") return renderDashboardHome();
+  return renderDashboardArea();
   const reports = state.reports;
   const sorted = [...reports].sort((a, b) => (b.completed_at || 0) - (a.completed_at || 0));
   const allSurveyPending = sorted.filter(r => stage(r) === "levantamento_pendente");
@@ -333,30 +567,31 @@ function workflowCard(group, active) {
   </button>`;
 }
 function empty(text) { return `<div class="card muted">${esc(text)}</div>`; }
-function reportSection(title, items, emptyText, subtitle = "") {
+function reportSection(title, items, emptyText, subtitle = "", openAction = "open") {
   return `<div class="section-title"><div><h2>${esc(title)}</h2>${subtitle ? `<p class="muted section-subtitle">${esc(subtitle)}</p>` : ""}</div><div class="spacer"></div><span class="muted">${items.length} total</span></div>
-    <section class="list">${items.length ? items.map(reportRow).join("") : empty(emptyText)}</section>`;
+    <section class="list">${items.length ? items.map(item => reportRow(item, openAction)).join("") : empty(emptyText)}</section>`;
 }
-function reportRow(r) {
+function reportRow(r, openAction = "open") {
   const responsible = assignedName(r);
-  return `<article class="card report-row" data-action="open" data-id="${esc(r.id)}">
+  const statusLabel = openAction === "open-survey-completed" ? "Concluído" : (r.delivery_status || "Sem status");
+  return `<article class="card report-row" data-action="${esc(openAction)}" data-id="${esc(r.id)}">
     <div class="row"><span class="row-icon">${icon("file")}</span><div><h3>${esc(r.client || "Cliente não informado")}</h3>
     <p class="muted">${fmtDate(r.completed_at)} · ${esc(r.consultant || "Sem consultor")} · ${deliveryCount(r)} itens${responsible ? ` · Responsável: ${esc(responsible)}` : ""}</p></div>
-    <div class="spacer"></div><span class="pill">${esc(r.delivery_status || "Sem status")}</span></div>
+    <div class="spacer"></div><span class="pill">${esc(statusLabel)}</span></div>
   </article>`;
 }
-function monthlyChart(reports) {
+function monthlyChart(reports, title = "Entregas por mês") {
   const now = new Date(), months = Array.from({length:6},(_,i)=>new Date(now.getFullYear(), now.getMonth()-5+i, 1));
   const counts = months.map(m => reports.filter(r => { const d = new Date(r.completed_at || 0); return d.getMonth()===m.getMonth() && d.getFullYear()===m.getFullYear(); }).length);
   const max = Math.max(1, ...counts);
-  return `<div class="card chart-card"><div class="chart-title"><h3>${icon("bar")}Entregas por mês</h3><span>${counts.reduce((a,b)=>a+b,0)} no período</span></div>
+  return `<div class="card chart-card"><div class="chart-title"><h3>${icon("bar")}${esc(title)}</h3><span>${counts.reduce((a,b)=>a+b,0)} no período</span></div>
     <div class="month-bars">${months.map((m,i)=>{
       const pct = Math.max(4, counts[i] / max * 100);
       const label = m.toLocaleDateString("pt-BR",{month:"short"}).replace(".","");
       return `<div class="month-row"><span>${label}</span><div class="month-track"><i style="width:${pct}%"></i></div><b>${counts[i]}</b></div>`;
     }).join("")}</div></div>`;
 }
-function statusChart(reports) {
+function statusChart(reports, title = "Situação") {
   const total = reports.length;
   const divisor = Math.max(1, total);
   const ok = reports.filter(r => isConcludedDeliveryStatus(r.delivery_status)).length;
@@ -367,7 +602,7 @@ function statusChart(reports) {
     ["Não concluídas", no, "no"],
     ["Sem definição", other, "other"]
   ];
-  return `<div class="card chart-card"><div class="chart-title"><h3>${icon("pie")}Situação</h3><span>${total} relatório${total === 1 ? "" : "s"}</span></div>
+  return `<div class="card chart-card"><div class="chart-title"><h3>${icon("pie")}${esc(title)}</h3><span>${total} relatório${total === 1 ? "" : "s"}</span></div>
     <div class="status-stack">
       <i class="ok" style="width:${ok/divisor*100}%"></i>
       <i class="no" style="width:${no/divisor*100}%"></i>
@@ -498,6 +733,7 @@ function surveyField(item, f) {
   const value = f[key] || f[key === "empresa" ? "cliente" : key] || "";
   if (type === "choice") return choice(key, label, value, extra);
   if (type === "textarea") return textarea(key, label, value, extra || 3);
+  if (type === "photo") return `<div class="field dynamic-photo"><label>${esc(label)}</label>${value ? `<img src="${esc(value)}" alt="${esc(label)}">` : ""}<input type="file" accept="image/*" capture="environment" data-survey-photo-field="${esc(key)}"></div>`;
   return input(key, label, value, false, type || "text");
 }
 function drawEditor() {
@@ -541,15 +777,27 @@ function stepHtml(name, p) {
     <div class="field"><label>Anexos / fotos</label><input type="file" id="files" multiple accept="image/*,.pdf"><input type="file" id="camera" accept="image/*" capture="environment"></div>
     <div class="attachments">${(p.report.attachments||[]).map(a=>`<div class="thumb">${a.uri?.startsWith("data:image")?`<img src="${a.uri}">`:""}<small>${esc(a.name)}</small></div>`).join("")}</div>`;
 }
-function input(key,label,value="",required=false,type="text"){return `<div class="field"><label>${esc(label)}</label><input data-field="${key}" value="${esc(value)}" type="${type}" ${required?"required":""}></div>`}
+function input(key,label,value="",required=false,type="text"){return `<div class="field"><label>${esc(label)}</label><input data-field="${esc(key)}" value="${esc(value)}" type="${esc(type)}" ${required?"required":""}></div>`}
 function userSelect(key,label,value=""){
   const options = state.users.map(user => `<option value="${esc(user.username)}" ${user.username === value ? "selected" : ""}>${esc(user.full_name || user.fullName || user.username)} (${esc(user.username)})</option>`).join("");
   return `<div class="field"><label>${esc(label)}</label><select data-field="${key}" required><option value="">Selecione o implantador</option>${options}</select></div>`;
 }
 function choice(key,label,value="",options=[]){return `<div class="field survey-choice"><label>${esc(label)}</label><div class="choice-row">${options.map(option=>`<label><input type="radio" name="${esc(key)}" data-field="${esc(key)}" value="${esc(option)}" ${value===option?"checked":""}>${esc(option)}</label>`).join("")}</div></div>`}
 function textarea(key,label,value="",minLines=3){return `<div class="field"><label>${esc(label)}</label><textarea data-field="${key}" rows="${minLines}">${esc(value)}</textarea></div>`}
-function groups(scope, groups, p){return groups.map(([g,items])=>`<div class="group"><h3>${esc(g)}</h3>${checks(items.map(i=>[scope,g,i]),p)}</div>`).join("")}
-function checks(items, p){const set=new Set(p.report.checks||[]);return `<div class="check-grid">${items.map(([s,g,i])=>{const k=S.key(s,g,i);return `<label class="check"><input type="checkbox" data-check="${esc(k)}" ${set.has(k)?"checked":""}>${esc(i)}</label>`}).join("")}</div>`}
+function dynamicReiField(scope, group, item, p) {
+  const label = schemaItemLabel(item), type = schemaItemType(item), key = schemaFieldKey(scope, group, item);
+  const value = p.report.fields?.[key] || "";
+  if (type === "choice") return choice(key, label, value, schemaItemOptions(item).length ? schemaItemOptions(item) : ["Sim", "Não"]);
+  if (type === "textarea") return textarea(key, label, value, 3);
+  if (type === "photo") return `<div class="field dynamic-photo"><label>${esc(label)}</label>${value ? `<img src="${esc(value)}" alt="${esc(label)}">` : ""}<input type="file" accept="image/*" capture="environment" data-photo-field="${esc(key)}"></div>`;
+  return input(key, label, value, false, type || "text");
+}
+function groups(scope, groupList, p){return groupList.map(([g,items])=>{
+  const checklist = items.filter(item => schemaItemType(item) === "checkbox");
+  const fields = items.filter(item => schemaItemType(item) !== "checkbox");
+  return `<div class="group"><h3>${esc(g)}</h3>${checklist.length ? checks(checklist.map(i=>[scope,g,i]),p) : ""}${fields.length ? `<div class="form-grid dynamic-rei-fields">${fields.map(item => dynamicReiField(scope,g,item,p)).join("")}</div>` : ""}</div>`;
+}).join("")}
+function checks(items, p){const set=new Set(p.report.checks||[]);return `<div class="check-grid">${items.map(([s,g,i])=>{const label=schemaItemLabel(i),k=S.key(s,g,label);return `<label class="check"><input type="checkbox" data-check="${esc(k)}" ${set.has(k)?"checked":""}>${esc(label)}</label>`}).join("")}</div>`}
 function signature(key,label,value){return `<div class="field"><label>${esc(label)}</label><canvas class="signature" data-signature="${key}" data-value="${esc(value||"")}"></canvas><button type="button" class="btn secondary" data-action="clear-signature" data-key="${key}">Limpar</button></div>`}
 function bindInputs() {
   $$("[data-field]").forEach(el => {
@@ -572,6 +820,18 @@ function bindInputs() {
     el.checked ? set.add(el.dataset.check) : set.delete(el.dataset.check);
     state.editing.report.checks = [...set];
   });
+  $$("[data-photo-field]").forEach(el => el.onchange = async () => {
+    const file = el.files?.[0];
+    if (!file) return;
+    state.editing.report.fields[el.dataset.photoField] = (await fileToAttachment(file)).uri;
+    drawEditor();
+  });
+  $$("[data-survey-photo-field]").forEach(el => el.onchange = async () => {
+    const file = el.files?.[0];
+    if (!file) return;
+    state.editing.report.fields[el.dataset.surveyPhotoField] = (await fileToAttachment(file)).uri;
+    drawSurvey();
+  });
   $$("#files,#camera").forEach(el => el && (el.onchange = async () => {
     const files = await Promise.all([...el.files].map(fileToAttachment));
     state.editing.report.attachments = [...(state.editing.report.attachments||[]), ...files];
@@ -592,29 +852,51 @@ function setupSignature(canvas) {
   canvas.onmousedown=canvas.ontouchstart=start; canvas.onmousemove=canvas.ontouchmove=move; canvas.onmouseup=canvas.onmouseleave=canvas.ontouchend=end;
 }
 
-function renderViewer(r) {
+function renderViewer(r, options = {}) {
   state.viewing = r;
+  state.viewingSurveyReadOnly = options.surveyReadOnly === true;
   const f = r.report.fields, checks = new Set(r.report.checks||[]);
   const evaluationScore = score(r);
-  const surveyLike = ["levantamento_pendente", "rei_pendente"].includes(stage(r));
+  const surveyLike = state.viewingSurveyReadOnly || stage(r) === "levantamento_pendente";
   const actions = [
     `<button class="btn secondary" data-action="dashboard">Voltar</button>`,
-    state.user.role === "supervisor" && stage(r) === "levantamento_pendente" ? `<button class="btn" data-action="edit-client" data-id="${esc(r.id)}">Editar cadastro</button>` : "",
-    state.user.role !== "supervisor" ? `<button class="btn" data-action="edit" data-id="${esc(r.id)}">Editar</button>` : "",
-    state.user.role === "supervisor" && isReadyForSupervisorEvaluation(r) && !hasEvaluation(r) ? `<button class="btn green" data-action="evaluate" data-id="${esc(r.id)}">Avaliar</button>` : "",
-    (surveyLike || isReadyForSupervisorEvaluation(r)) ? `<button class="btn" data-action="print">${surveyLike ? "Imprimir levantamento" : "Reimprimir PDF"}</button>` : ""
+    !state.viewingSurveyReadOnly && state.user.role === "supervisor" && stage(r) === "levantamento_pendente" ? `<button class="btn" data-action="edit-client" data-id="${esc(r.id)}">Editar cadastro</button>` : "",
+    !state.viewingSurveyReadOnly && state.user.role !== "supervisor" ? `<button class="btn" data-action="edit" data-id="${esc(r.id)}">Editar</button>` : "",
+    !state.viewingSurveyReadOnly && state.user.role === "supervisor" && isReadyForSupervisorEvaluation(r) && !hasEvaluation(r) ? `<button class="btn green" data-action="evaluate" data-id="${esc(r.id)}">Avaliar</button>` : "",
+    (state.viewingSurveyReadOnly || (!surveyLike && isReadyForSupervisorEvaluation(r))) ? `<button class="btn" data-action="print">${state.viewingSurveyReadOnly ? "Imprimir relatório" : "Reimprimir PDF"}</button>` : ""
   ].filter(Boolean).join("");
   shell(`<section class="hero viewer"><h1>${esc(r.client || f.cliente)}</h1><p>${fmtDate(r.completed_at)} · ${esc(r.consultant || f.consultor || "")}</p></section>
     <section class="card viewer">${dl([["Cliente / Projeto",f.cliente],["Implantador responsável",assignedName(r)],["Contato",f.contato],["Tel/Cel",f.telefone],["E-mail",f.email],["CNPJ",f.cnpj],["Consultor",f.consultor],["Início",f.inicio],["Término",f.termino],["Status",r.report.deliveryStatus],["Serviços executados",f.servicosExecutados],["Pendências",f.pendencias]])}</section>
     ${hasEvaluation(r)?supervisionEvaluationCard(r, evaluationScore, checks):""}
-    <section class="card"><h2>Checklists marcados</h2>${selected(S.technical,"tecnico",checks)}${selected(S.stock,"estoque",checks)}${selected(S.finance,"financeiro",checks)}${selected(S.fiscal,"fiscal",checks)}</section>
+    ${state.viewingSurveyReadOnly ? surveyViewerHtml(f) : `<section class="card"><h2>Dados preenchidos no R.E.I.</h2>${selected(S.technical,"tecnico",checks,f)}${selected(S.stock,"estoque",checks,f)}${selected(S.finance,"financeiro",checks,f)}${selected(S.fiscal,"fiscal",checks,f)}</section>`}
     ${surveyLike ? printSurveyHtml(r) : printReportHtml(r)}
     <div class="footer-actions no-print">${actions}</div>`);
 }
+function surveyViewerHtml(fields) {
+  return surveySections.map(([title, sectionFields]) => {
+    const values = sectionFields.map(([key, label, type]) => {
+      const value = fields[key] || (key === "empresa" ? fields.cliente : "");
+      if (!value) return "";
+      return `<div class="dynamic-value"><small>${esc(label)}</small>${type === "photo" ? `<img src="${esc(value)}" alt="${esc(label)}">` : `<b>${esc(value)}</b>`}</div>`;
+    }).filter(Boolean).join("");
+    return values ? `<section class="card viewer-survey-section"><h2>${esc(title)}</h2><div class="dynamic-values">${values}</div></section>` : "";
+  }).join("");
+}
 function dl(items){return `<dl>${items.map(([k,v])=>`<dt>${esc(k)}</dt><dd>${esc(v||"Não informado")}</dd>`).join("")}</dl>`}
-function selected(groups, scope, checks){return groups.map(([g,items])=>items.filter(i=>checks.has(S.key(scope,g,i))).map(i=>`<span class="pill">${esc(i)}</span>`).join(" ")).filter(Boolean).join("<br>") || "<p class='muted'>Nenhum item marcado.</p>"}
+function selected(groups, scope, checks, fields = {}) {
+  const content = groups.map(([g,items]) => {
+    const marked = items.filter(i => schemaItemType(i) === "checkbox" && checks.has(S.key(scope,g,i))).map(i => `<span class="pill">${esc(schemaItemLabel(i))}</span>`).join(" ");
+    const values = items.filter(i => schemaItemType(i) !== "checkbox").map(i => {
+      const value = fields[schemaFieldKey(scope,g,i)];
+      if (!value) return "";
+      return `<div class="dynamic-value"><small>${esc(schemaItemLabel(i))}</small>${schemaItemType(i) === "photo" ? `<img src="${esc(value)}" alt="${esc(schemaItemLabel(i))}">` : `<b>${esc(value)}</b>`}</div>`;
+    }).filter(Boolean).join("");
+    return marked || values ? `<div class="viewer-dynamic-group"><h3>${esc(g)}</h3>${marked}<div class="dynamic-values">${values}</div></div>` : "";
+  }).filter(Boolean).join("");
+  return content || "<p class='muted'>Nenhum dado informado.</p>";
+}
 function selectedCards(groups, scope, checks) {
-  const items = groups.flatMap(([g, list]) => list.filter(i => checks.has(S.key(scope, g, i))).map(i => [g, i]));
+  const items = groups.flatMap(([g, list]) => list.filter(i => schemaItemType(i) === "checkbox" && checks.has(S.key(scope, g, i))).map(i => [g, schemaItemLabel(i)]));
   if (!items.length) return `<p class="muted">Nenhum item marcado.</p>`;
   return `<div class="evaluation-checks">${items.map(([g, i]) => `<div class="evaluation-check"><small>${esc(g)}</small><span>${esc(i)}</span></div>`).join("")}</div>`;
 }
@@ -658,19 +940,19 @@ function printReportHtml(r) {
     ])}
     <div class="print-support"><b>CONTATOS COM O SUPORTE TÉCNICO</b><span>suportetga@dubrasilsolucoes.com.br • (34) 3322-8500</span></div>
     ${pSection("PREENCHIMENTO TÉCNICO")}
-    ${pGroups("tecnico", S.technical, checks)}
+    ${pGroups("tecnico", S.technical, checks, f)}
     ${pInfoTable([["Tipo do certificado digital", f.tipoCertificado], ["Quantidade de usuários no Workflow", f.qtdWorkflow]])}
     ${pParagraph("Observações técnicas", f.observacoesTecnicas)}
-    ${pSection("MÓDULO ESTOQUE")}${pGroups("estoque", S.stock, checks)}
-    ${pSection("MÓDULO FINANCEIRO")}${pGroups("financeiro", S.finance, checks)}
-    ${pSection("MÓDULO FISCAL E RELATÓRIOS")}${pGroups("fiscal", S.fiscal, checks)}
+    ${pSection("MÓDULO ESTOQUE")}${pGroups("estoque", S.stock, checks, f)}
+    ${pSection("MÓDULO FINANCEIRO")}${pGroups("financeiro", S.finance, checks, f)}
+    ${pSection("MÓDULO FISCAL E RELATÓRIOS")}${pGroups("fiscal", S.fiscal, checks, f)}
     ${pSection("ENTREGA DA IMPLANTAÇÃO")}
     ${pParagraph("Descritivo dos serviços executados", f.servicosExecutados)}
     ${pStatus(data.deliveryStatus)}
     ${pParagraph("Pendências pós-implantação", f.pendencias)}
     ${pSection("ASSINATURAS")}
     ${pSignatures(f)}
-    ${hasEvaluation(r) ? `${pSection("AVALIAÇÃO DA SUPERVISÃO")}${pInfoTable([["Supervisor", f._supervisorName], ["Nota", evScore == null ? f._supervisionScore : `${evScore.toFixed(1)}/10`], ["Parecer / observação", data.rating]])}${pGroups("supervisao", S.supervision, checks)}` : ""}
+    ${hasEvaluation(r) ? `${pSection("AVALIAÇÃO DA SUPERVISÃO")}${pInfoTable([["Supervisor", f._supervisorName], ["Nota", evScore == null ? f._supervisionScore : `${evScore.toFixed(1)}/10`], ["Parecer / observação", data.rating]])}${pGroups("supervisao", S.supervision, checks, f)}` : ""}
     ${(data.attachments || []).length ? `${pSection("EVIDÊNCIAS E ANEXOS")}${pAttachments(data.attachments)}` : ""}
     <footer class="print-footer">DuBrasil Soluções • suporte: (34) 3322-8500</footer>
   </article>`;
@@ -697,8 +979,10 @@ function printSurveyHtml(r) {
 }
 function pSurveyFields(fields, f) {
   const choices = fields.filter(([, , type]) => type === "choice");
-  const texts = fields.filter(([, , type]) => type !== "choice");
+  const photos = fields.filter(([, , type]) => type === "photo");
+  const texts = fields.filter(([, , type]) => type !== "choice" && type !== "photo");
   return `${choices.length ? `<div class="print-info">${choices.map(([key,label]) => `<div><small>${esc(label).toUpperCase()}</small><b>${esc(f[key] || "—")}</b></div>`).join("")}</div>` : ""}
+    ${photos.map(([key,label]) => `<div class="print-photo"><small>${esc(label).toUpperCase()}</small>${f[key] ? `<img src="${esc(f[key])}" alt="${esc(label)}">` : `<b>—</b>`}</div>`).join("")}
     ${texts.map(([key,label,type]) => type === "textarea" ? pParagraph(label, f[key]) : pInfoTable([[label, f[key]]])).join("")}`;
 }
 function formatSurveyDateTime(value) {
@@ -711,10 +995,22 @@ function pInfoTable(items) {
   return `<div class="print-info">${items.map(([k,v]) => `<div><small>${esc(k).toUpperCase()}</small><b>${esc(v || "—")}</b></div>`).join("")}</div>`;
 }
 function pChecklist(items, keyFor, checks, cols = 2) {
-  return `<div class="print-checks cols-${cols}">${items.map(item => `<div><span class="${checks.has(keyFor(item)) ? "on" : ""}"></span>${esc(item)}</div>`).join("")}</div>`;
+  return `<div class="print-checks cols-${cols}">${items.map(item => `<div><span class="${checks.has(keyFor(item)) ? "on" : ""}"></span>${esc(schemaItemLabel(item))}</div>`).join("")}</div>`;
 }
-function pGroups(scope, groups, checks) {
-  return groups.map(([group, items]) => `<h3 class="print-subsection">${esc(group).toUpperCase()}</h3>${pChecklist(items, item => S.key(scope, group, item), checks, 2)}`).join("");
+function pGroups(scope, groups, checks, fields = {}) {
+  return groups.map(([group, items]) => {
+    const checklist = items.filter(item => schemaItemType(item) === "checkbox");
+    const typed = items.filter(item => schemaItemType(item) !== "checkbox");
+    const typedValues = typed.filter(item => schemaItemType(item) !== "photo").map(item => {
+      const value = fields[schemaFieldKey(scope,group,item)];
+      return [schemaItemLabel(item), value];
+    });
+    const photos = typed.filter(item => schemaItemType(item) === "photo").map(item => {
+      const value = fields[schemaFieldKey(scope,group,item)];
+      return value ? `<figure><figcaption>${esc(schemaItemLabel(item))}</figcaption><img src="${esc(value)}" alt="${esc(schemaItemLabel(item))}"></figure>` : "";
+    }).filter(Boolean).join("");
+    return `<h3 class="print-subsection">${esc(group).toUpperCase()}</h3>${checklist.length ? pChecklist(checklist, item => S.key(scope, group, item), checks, 2) : ""}${typedValues.length ? pInfoTable(typedValues) : ""}${photos ? `<div class="print-attachments">${photos}</div>` : ""}`;
+  }).join("");
 }
 function pParagraph(label, value) {
   return `<div class="print-paragraph"><small>${esc(label).toUpperCase()}</small><p>${esc(value || "Não informado")}</p></div>`;
@@ -810,20 +1106,36 @@ document.addEventListener("click", async e => {
   e.preventDefault();
   const action = a.dataset.action, id = a.dataset.id;
   try {
-    if (action === "logout") { await api("/api/auth/logout",{method:"POST"}).catch(()=>{}); localStorage.removeItem("reiToken"); state.token=""; state.user=null; renderLogin(); }
+    if (action === "logout") { await api("/api/auth/logout",{method:"POST"}).catch(()=>{}); localStorage.removeItem("reiToken"); state.token=""; state.user=null; window.location.replace("/login"); }
+    if (action === "settings") renderAccountSettings();
+    if (action === "theme") {
+      applyTheme(a.dataset.themeMode, true);
+      $$(".theme-option").forEach(option => {
+        const selected = option.dataset.themeMode === a.dataset.themeMode;
+        option.classList.toggle("active", selected);
+        option.setAttribute("aria-checked", String(selected));
+      });
+    }
     if (action === "dashboard") { await loadUsers(); await loadReports(); renderDashboard(); }
+    if (action === "dashboard-home") { state.dashboardArea = "home"; state.dashboardFilter = "levantamentos"; renderDashboard(); }
+    if (action === "dashboard-area") { state.dashboardArea = a.dataset.area || "implantacoes"; state.dashboardFilter = state.dashboardArea === "levantamentos" ? "levantamentos" : "pendentes"; renderDashboard(); }
     if (action === "new" && state.user.role !== "supervisor") renderEditor(blankReport());
     if (action === "new-survey" && state.user.role !== "supervisor") renderSurvey(blankSurveyPayload());
     if (action === "new-client" && state.user.role === "supervisor") renderClientForm();
     if (action === "open") {
       const report = state.reports.find(r => r.id === id);
+      state.viewingSurveyReadOnly = false;
       if (stage(report) === "levantamento_pendente" && state.user.role !== "supervisor") renderSurvey(report);
       else if (stage(report) === "rei_pendente" && state.user.role !== "supervisor") renderEditor(report);
       else renderViewer(report);
     }
+    if (action === "open-survey-completed") {
+      const report = state.reports.find(r => r.id === id);
+      if (report && stage(report) === "rei_pendente") renderViewer(report, { surveyReadOnly: true });
+    }
     if (action === "dashboard-filter") { state.dashboardFilter = a.dataset.filter; renderDashboard(); }
     if (action === "edit-client" && state.user.role === "supervisor") renderClientForm(state.reports.find(r => r.id === id));
-    if (action === "edit") renderEditor(state.reports.find(r => r.id === id));
+    if (action === "edit" && state.user.role !== "supervisor" && !state.viewingSurveyReadOnly) renderEditor(state.reports.find(r => r.id === id));
     if (action === "step") { state.step = Number(a.dataset.step); drawEditor(); }
     if (action === "prev") { state.step = Math.max(0, state.step - 1); drawEditor(); }
     if (action === "next") { state.step = Math.min(steps.length - 1, state.step + 1); drawEditor(); }
@@ -855,6 +1167,7 @@ document.addEventListener("click", async e => {
     if (action === "complete-survey") {
       if(!field(state.editing,"cliente") && !field(state.editing,"empresa")) return alert("Informe a empresa/cliente.");
       state.editing.report.fields._stage = "rei_pendente";
+      state.editing.report.fields._surveyCompletedAt = String(Date.now());
       if (!state.editing.report.fields.cliente) state.editing.report.fields.cliente = state.editing.report.fields.empresa;
       await savePayload(state.editing);
       renderDashboard();
@@ -867,10 +1180,15 @@ document.addEventListener("click", async e => {
       renderViewer(state.reports.find(r => r.id === savedId));
       await printCurrentReport();
     }
-    if (action === "print" && isReadyForSupervisorEvaluation(state.viewing)) { await printCurrentReport(); }
+    if (action === "print" && ((state.viewingSurveyReadOnly && stage(state.viewing) === "rei_pendente") || isReadyForSupervisorEvaluation(state.viewing))) { await printCurrentReport(); }
     if (action === "evaluate") {
       const report = state.reports.find(r => r.id === id);
       if (state.user.role === "supervisor" && isReadyForSupervisorEvaluation(report)) renderEvaluation(report);
+    }
+    if (action === "open-evaluation-reminder") {
+      const report = state.reports.find(item => item.id === id);
+      $(".evaluation-reminder")?.remove();
+      if (report) renderViewer(report);
     }
     if (action === "close-modal") $(".modal")?.remove();
     if (action === "save-evaluation") { const r = state.reports.find(x => x.id === id); r.report.fields._supervisorName = state.user.fullName || state.user.username; r.report.fields._supervisionReviewedAt = String(Date.now()); await savePayload(r); $(".modal")?.remove(); renderViewer(state.reports.find(x => x.id === id)); }
@@ -881,6 +1199,13 @@ document.addEventListener("click", async e => {
 });
 
 (async function init() {
-  if (await loadMe()) { await loadSchemaOverrides(); await loadUsers(); await loadReports(); renderDashboard(); }
-  else renderLogin();
+  if (await loadMe()) {
+    applyTheme(storedThemeMode()); await loadSchemaOverrides(); await loadUsers(); await loadReports(); renderDashboard();
+    if (window.location.hash === "#settings") {
+      history.replaceState(null, "", window.location.pathname + window.location.search);
+      renderAccountSettings();
+    }
+    showDailyEvaluationReminder();
+  }
+  else window.location.replace("/login");
 })();

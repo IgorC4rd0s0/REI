@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <title>Fluxograma operacional do Guia R.E.I.</title>
+  <style>
+    @page { size: A3 landscape; margin: 0; }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; background: #dfe5f0; color: #101a34; font-family: "Segoe UI", Arial, sans-serif; }
+    .page { position: relative; width: 420mm; height: 297mm; padding: 13mm 15mm 14mm; overflow: hidden; background: #f7f9fd; }
+    header { display: flex; align-items: center; gap: 6mm; height: 28mm; padding: 4mm 6mm; border-radius: 5mm; background: linear-gradient(120deg, #142452, #29458e); color: #fff; }
+    header img { width: 20mm; height: 20mm; object-fit: contain; border-radius: 50%; background: #fff; }
+    header h1 { margin: 0; font-size: 24pt; }
+    header p { margin: 1mm 0 0; color: #dbe3ff; font-size: 10.5pt; }
+    .status { margin-left: auto; padding: 2.5mm 4mm; border-radius: 8mm; background: rgba(255,255,255,.14); color: #fff; font-size: 9pt; font-weight: 700; }
+    .flow { display: grid; grid-template-columns: repeat(6, 1fr); grid-template-rows: 60mm 60mm 60mm; gap: 12mm 8mm; margin-top: 10mm; }
+    .step { position: relative; display: flex; flex-direction: column; justify-content: center; padding: 6mm; border: 1px solid #ccd7ea; border-radius: 5mm; background: #fff; box-shadow: 0 2mm 5mm rgba(28,47,94,.08); }
+    .step h2 { margin: 0 0 2mm; color: #172e68; font-size: 13pt; line-height: 1.18; }
+    .step p { margin: 0; color: #5b6883; font-size: 9pt; line-height: 1.32; }
+    .step .num { position: absolute; top: -5mm; left: 5mm; display: flex; width: 10mm; height: 10mm; align-items: center; justify-content: center; border-radius: 50%; background: #29458e; color: #fff; font-size: 9pt; font-weight: 800; }
+    .step.supervisor { border-top: 3mm solid #3e9a42; }
+    .step.implantador { border-top: 3mm solid #2f5aa3; }
+    .step.system { border-top: 3mm solid #7654a4; }
+    .step.final { border-top: 3mm solid #d49a2f; background: #fffbf2; }
+    .right::after { content: "→"; position: absolute; right: -7mm; top: 50%; transform: translate(50%,-50%); color: #4964a0; font-size: 24pt; font-weight: 800; z-index: 2; }
+    .left::after { content: "←"; position: absolute; left: -7mm; top: 50%; transform: translate(-50%,-50%); color: #4964a0; font-size: 24pt; font-weight: 800; z-index: 2; }
+    .down::before { content: "↓"; position: absolute; left: 50%; bottom: -11mm; transform: translateX(-50%); color: #4964a0; font-size: 24pt; font-weight: 800; z-index: 2; }
+    .decision { border: 2px solid #d49a2f; background: #fff9ea; }
+    .decision h2 { color: #7b5514; }
+    .branch { position: absolute; left: 6mm; right: 6mm; bottom: 4mm; display: flex; justify-content: space-between; color: #6c551f; font-size: 7.5pt; font-weight: 800; }
+    .legend { position: absolute; right: 16mm; bottom: 17mm; display: flex; gap: 3mm; }
+    .legend span { padding: 2mm 3mm; border-radius: 8mm; color: #fff; font-size: 8pt; font-weight: 700; }
+    .legend .s { background: #3e9a42; }.legend .i { background: #2f5aa3; }.legend .a { background: #7654a4; }.legend .f { background: #d49a2f; }
+    footer { position: absolute; left: 15mm; right: 15mm; bottom: 5mm; display: flex; justify-content: space-between; padding-top: 2.5mm; border-top: 1px solid #d5ddeb; color: #66728e; font-size: 8pt; }
+    @media print { html, body { background: #fff; } * { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }
+  </style>
+</head>
+<body>
+  <section class="page">
+    <header>
+      <img src="../logo_dbs_app.png" alt="DuBrasil Soluções">
+      <div><h1>Fluxograma operacional do Guia R.E.I.</h1><p>Do cadastro do cliente à entrega, avaliação e geração de indicadores.</p></div>
+      <span class="status">Levantamento → Implantação → Avaliação</span>
+    </header>
+
+    <div class="flow">
+      <div class="step supervisor right"><span class="num">1</span><h2>Cliente adquirido</h2><p>O supervisor registra os dados básicos do novo atendimento.</p></div>
+      <div class="step supervisor right"><span class="num">2</span><h2>Responsável definido</h2><p>O supervisor seleciona o implantador responsável pelo levantamento.</p></div>
+      <div class="step implantador right"><span class="num">3</span><h2>Agendamento</h2><p>O implantador informa a data e o horário da coleta com o cliente.</p></div>
+      <div class="step system right"><span class="num">4</span><h2>Lembrete</h2><p>O Android envia uma notificação 30 minutos antes do levantamento.</p></div>
+      <div class="step implantador right"><span class="num">5</span><h2>Levantamento</h2><p>O formulário é preenchido em etapas e pode ser salvo para continuar depois.</p></div>
+      <div class="step decision down"><span class="num">6</span><h2>Dados conferidos?</h2><p>O implantador revisa os campos antes de concluir.</p><div class="branch"><span>Não: continuar preenchendo</span><span>Sim: concluir</span></div></div>
+
+      <div class="step system down"><span class="num">12</span><h2>R.E.I. liberado</h2><p>O mesmo registro passa para “implantação pendente”.</p></div>
+      <div class="step system left"><span class="num">11</span><h2>Levantamento concluído</h2><p>Fica bloqueado para edição e disponível para consulta e PDF.</p></div>
+      <div class="step implantador left"><span class="num">10</span><h2>Concluir levantamento</h2><p>A conclusão registra a data e preserva o documento coletado.</p></div>
+      <div class="step implantador left"><span class="num">9</span><h2>Imagens e arquivos</h2><p>Fotos podem ser tiradas pela câmera ou selecionadas no dispositivo.</p></div>
+      <div class="step implantador left"><span class="num">8</span><h2>Salvar e continuar</h2><p>Rascunhos permanecem disponíveis até o preenchimento completo.</p></div>
+      <div class="step implantador left"><span class="num">7</span><h2>Coleta por tópicos</h2><p>Dados comerciais, técnicos, estoque, financeiro, fiscal e demais etapas.</p></div>
+
+      <div class="step implantador right"><span class="num">13</span><h2>Iniciar implantação</h2><p>O implantador abre o R.E.I. e começa o registro da execução.</p></div>
+      <div class="step implantador right"><span class="num">14</span><h2>Preencher etapas</h2><p>Identificação, técnico, estoque, financeiro, fiscal e entrega.</p></div>
+      <div class="step implantador right"><span class="num">15</span><h2>Evidências e aceite</h2><p>Fotos, observações e assinaturas do técnico e do cliente.</p></div>
+      <div class="step decision right"><span class="num">16</span><h2>Implantação concluída?</h2><p>Somente status concluído libera o relatório final.</p><div class="branch"><span>Não: permanece em andamento</span><span>Sim: gerar PDF</span></div></div>
+      <div class="step supervisor right"><span class="num">17</span><h2>Avaliação única</h2><p>O supervisor informa nota, checklist e parecer, sem edição posterior.</p></div>
+      <div class="step final"><span class="num">18</span><h2>Histórico e gestão</h2><p>PDF, reimpressão, nota média, gráficos, acompanhamento e dados para BI.</p></div>
+    </div>
+
+    <div class="legend"><span class="s">Supervisor</span><span class="i">Implantador</span><span class="a">Automação do sistema</span><span class="f">Resultado final</span></div>
+    <footer><span>DuBrasil Soluções · Guia do Sistema R.E.I.</span><span>Página 1 de 1</span></footer>
+  </section>
+</body>
+</html>
