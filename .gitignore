@@ -14,3 +14,8 @@ server/__pycache__/
 .codex/
 .kotlin/
 hs_err_pid*.log
+replay_pid*.log
+dist/
+*.tmp
+Thumbs.db
+.DS_Store

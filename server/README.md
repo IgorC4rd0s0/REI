@@ -1,25 +1,55 @@
-# Servidor central R.E.I.
+# Servidor central do R.E.I.
 
-Servidor local do escritório que recebe os relatórios Android e grava os dados em SQLite.
+Servidor local responsável pela autenticação, API, aplicação web e armazenamento central dos relatórios.
 
-## Iniciar
+## Execução
 
-Execute `start-server.ps1` no PowerShell. O servidor escuta a porta `8765` em todas as interfaces. Para sincronizar no modo recomendado, o celular deve estar no Wi-Fi do escrit?rio. Fora da rede, o app Android trabalha offline e envia os relat?rios pendentes quando voltar para uma rede Wi-Fi com acesso ao servidor.
+Na raiz do projeto:
 
-Para iniciar o servidor automaticamente ao entrar no Windows, execute uma vez `install-autostart.ps1`. Para desfazer, use `uninstall-autostart.ps1`.
+```powershell
+.\server\start-server.ps1
+```
 
-Endereços atuais:
+O servidor escuta a porta `8765` em todas as interfaces. Acesse no próprio computador:
 
-- administração de usuários: `http://192.168.1.123:8765/admin`
-- saúde: `http://192.168.1.123:8765/health`
-- relatórios: `http://192.168.1.123:8765/api/reports`
-- CSV para BI: `http://192.168.1.123:8765/api/bi/reports.csv`
+```text
+http://localhost:8765/login
+```
 
-No primeiro acesso a `/admin`, cadastre o supervisor inicial. Depois, use esse painel para criar e ativar/desativar usuários dos tipos:
+Em outro dispositivo da rede, use `http://IP-DO-SERVIDOR:8765/login`.
 
-- **supervisor**: acessa o dashboard, edita implantações e reimprime relatórios em PDF;
-- **implantador**: acessa o dashboard, retoma rascunhos, edita implantações entregues e envia relatórios concluídos.
+## Inicialização automática
 
-O aplicativo autentica pela sessão do usuário. A rota CSV para BI também aceita o cabeçalho `X-API-Key` configurado em `config.json`. O banco fica em `data/rei_central.db`, utiliza modo WAL e registra quem enviou cada relatório.
+```powershell
+.\server\install-autostart.ps1
+```
 
-Se o IP do computador mudar, informe o novo endere?o na tela de login do app Android. N?o ? necess?rio recompilar o APK apenas para trocar o servidor.
+Para remover:
+
+```powershell
+.\server\uninstall-autostart.ps1
+```
+
+## Dados e configuração
+
+- configuração: `server/config.json`;
+- exemplo seguro: `server/config.example.json`;
+- banco central: `server/data/rei_central.db`;
+- campos personalizados: `server/data/schema_items.json`;
+- exportação para BI: `/api/bi/reports.csv`;
+- verificação do servidor: `/health`.
+
+`config.json` e `data/` são locais e ignorados pelo Git. Não publique bancos, chaves ou backups.
+
+## Perfis
+
+- **supervisor:** gerencia usuários e itens dos relatórios, acompanha registros, cadastra clientes, avalia implantações concluídas e reimprime PDFs;
+- **implantador:** cria ou preenche levantamentos, executa o R.E.I., salva rascunhos, conclui e imprime seus documentos.
+
+O primeiro acesso cria o supervisor inicial. Depois, os usuários são administrados em `/admin` e os campos em `/admin/items`.
+
+## Rede
+
+O modo recomendado é sincronizar o Android no Wi-Fi do escritório. Fora da rede, o aplicativo trabalha offline e envia as pendências ao retornar.
+
+Se o IP do computador mudar, altere o endereço na engrenagem do aplicativo; não é necessário recompilar o APK. Para acesso externo, consulte [EXTERNAL_ACCESS.md](EXTERNAL_ACCESS.md) e utilize preferencialmente VPN ou túnel HTTPS.

@@ -1,42 +1,39 @@
-# R.E.I. Web
+# Aplicação web do R.E.I.
 
-Versão web do Relatório de Entrega de Implantação.
+Frontend responsivo servido diretamente pelo servidor Python. Não existe uma etapa separada de compilação.
 
-## Como acessar
+## Acesso
 
-Com o servidor Python iniciado:
-
-```powershell
-python server/rei_server.py
-```
-
-Abra no navegador:
+Com o servidor iniciado:
 
 ```text
-http://localhost:8765/web
+http://localhost:8765/login
 ```
 
-Na rede do escritório, use o IP do computador servidor:
+Na rede do escritório:
 
 ```text
-http://192.168.1.123:8765/web
+http://IP-DO-SERVIDOR:8765/login
 ```
+
+O login identifica o perfil e abre automaticamente a área de supervisor ou implantador.
+
+## Responsabilidades dos arquivos
+
+- `index.html`: entrada e metadados da aplicação;
+- `app.js`: estado, API, dashboards, formulários, avaliações e impressão;
+- `schema.js`: estrutura padrão dos relatórios;
+- `styles.css`: layout responsivo, temas e estilos de impressão;
+- `assets/`: logos e favicons utilizados pelo navegador e pelos PDFs.
 
 ## Recursos
 
-- login com os mesmos usuários do app Android;
-- dashboard para supervisor e implantador;
-- criação e edição de relatórios;
-- checklists técnico, estoque, financeiro, fiscal e entrega;
-- anexos/fotos pelo navegador;
-- assinatura digital em canvas;
-- visualização e reimpressão via `Imprimir / Salvar como PDF`;
-- avaliação de supervisão com checklist, nota e parecer;
-- implantador visualiza nota média e últimas avaliações recebidas.
+- dashboards separados para levantamentos e implantações;
+- formulários em etapas e campos dinâmicos;
+- fotos, assinaturas e PDFs;
+- avaliações da supervisão;
+- temas claro e escuro;
+- administração de usuários e itens dos relatórios;
+- permissões específicas para supervisor e implantador.
 
-## Arquivos
-
-- `index.html`: entrada da aplicação;
-- `styles.css`: layout responsivo e impressão;
-- `schema.js`: checklists e módulos;
-- `app.js`: telas, chamadas de API e regras da web app.
+As personalizações são carregadas de `/api/schema-overrides`; os relatórios são consultados e gravados por `/api/reports`.

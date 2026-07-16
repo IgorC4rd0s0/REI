@@ -2,12 +2,12 @@
 
 Sistema de levantamento de dados e emissão do Relatório de Entrega de Implantação do ERP TGA. O projeto é composto por aplicativo Android offline, interface web responsiva, API Python e banco SQLite central.
 
-Para uma apresentação simples do sistema, dos perfis e dos benefícios para a empresa, consulte o [Guia do Sistema R.E.I.](Guia_REI.pdf).
+Para uma apresentação simples do sistema, dos perfis e dos benefícios para a empresa, consulte o [Guia do Sistema R.E.I.](docs/pdf/Guia_REI.pdf).
 
 Documentos visuais:
 
-- [Fluxograma técnico](Fluxograma_Tecnico_REI.pdf);
-- [Fluxograma operacional do Guia R.E.I.](Fluxograma_Guia_REI.pdf).
+- [Fluxograma técnico](docs/pdf/Fluxograma_Tecnico_REI.pdf);
+- [Fluxograma operacional do Guia R.E.I.](docs/pdf/Fluxograma_Guia_REI.pdf).
 
 ## Arquitetura
 
@@ -79,12 +79,11 @@ Rei/
 │   ├── data/rei_central.db          Banco central
 │   ├── data/schema_items.json       Personalizações dos formulários
 │   └── *.ps1                        Inicialização e configuração do Windows
-├── docs/Guia_REI.html               Fonte do guia institucional
-├── docs/Fluxograma_Tecnico_REI.html  Fonte do fluxograma técnico
-├── docs/Fluxograma_Guia_REI.html     Fonte do fluxo operacional
-├── Guia_REI.pdf                     Guia paginado para usuários
-├── Fluxograma_Tecnico_REI.pdf       Arquitetura e sincronização
-├── Fluxograma_Guia_REI.pdf          Processo de implantação
+├── docs/
+│   ├── pdf/                         Guias e fluxogramas prontos
+│   ├── sources/                     Fontes HTML dos documentos
+│   └── reference/                   Materiais usados na modelagem
+├── dist/android/                    APK local para distribuição
 └── README.md                        Documentação técnica
 ```
 
@@ -252,6 +251,14 @@ APK gerado:
 ```text
 app/build/outputs/apk/debug/app-debug.apk
 ```
+
+Depois da validação, uma cópia pode ser mantida para instalação em:
+
+```text
+dist/android/REI-debug.apk
+```
+
+`dist/` é ignorada pelo Git porque contém artefatos binários recriáveis.
 
 Instalar em dispositivo conectado:
 
