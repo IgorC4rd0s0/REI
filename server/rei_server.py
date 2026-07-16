@@ -629,7 +629,12 @@ def initialize_database() -> None:
                 completed_at INTEGER NOT NULL,
                 received_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
-                payload_json TEXT NOT NULL
+                payload_json TEXT NOT NULL,
+                created_by_user_id INTEGER,
+                stage TEXT NOT NULL DEFAULT '',
+                owner_username TEXT NOT NULL DEFAULT '' COLLATE NOCASE,
+                assigned_username TEXT NOT NULL DEFAULT '' COLLATE NOCASE,
+                updated_by_username TEXT NOT NULL DEFAULT '' COLLATE NOCASE
             );
             CREATE INDEX IF NOT EXISTS idx_reports_completed_at ON reports(completed_at);
             CREATE INDEX IF NOT EXISTS idx_reports_client ON reports(client);
@@ -672,11 +677,66 @@ def initialize_database() -> None:
                 FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
             );
             CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+
+            CREATE TABLE IF NOT EXISTS device_heartbeats (
+                user_id INTEGER NOT NULL,
+                username TEXT NOT NULL COLLATE NOCASE,
+                device_id TEXT NOT NULL,
+                app_version TEXT NOT NULL,
+                last_seen TEXT NOT NULL,
+                client_last_seen INTEGER NOT NULL,
+                pending_count INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT,
+                PRIMARY KEY(user_id, device_id),
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_device_heartbeats_seen ON device_heartbeats(last_seen DESC);
+            CREATE INDEX IF NOT EXISTS idx_device_heartbeats_username ON device_heartbeats(username);
             """
         )
         report_columns = {row[1] for row in db.execute("PRAGMA table_info(reports)")}
-        if "created_by_user_id" not in report_columns:
-            db.execute("ALTER TABLE reports ADD COLUMN created_by_user_id INTEGER")
+        report_migrations = {
+            "created_by_user_id": "INTEGER",
+            "stage": "TEXT NOT NULL DEFAULT ''",
+            "owner_username": "TEXT NOT NULL DEFAULT '' COLLATE NOCASE",
+            "assigned_username": "TEXT NOT NULL DEFAULT '' COLLATE NOCASE",
+            "updated_by_username": "TEXT NOT NULL DEFAULT '' COLLATE NOCASE",
+        }
+        for column, definition in report_migrations.items():
+            if column not in report_columns:
+                db.execute(f"ALTER TABLE reports ADD COLUMN {column} {definition}")
+
+        for row in db.execute(
+            "SELECT id, payload_json, stage, owner_username, assigned_username, updated_by_username "
+            "FROM reports WHERE stage=''"
+        ).fetchall():
+            try:
+                payload = json.loads(row["payload_json"] or "{}")
+                fields = (payload.get("report") or {}).get("fields") or {}
+                if not isinstance(fields, dict):
+                    raise ValueError("fields não é um objeto")
+                stage = str(fields.get("_stage") or "rei").strip() or "rei"
+                owner = str(fields.get("_ownerUsername") or fields.get("_createdBy") or "").strip().casefold()
+                assigned = str(fields.get("_assignedImplantadorUsername") or "").strip().casefold()
+                updated_by = str(fields.get("_updatedBy") or fields.get("_createdBy") or owner).strip().casefold()
+                db.execute(
+                    """
+                    UPDATE reports SET
+                        stage=CASE WHEN stage='' THEN ? ELSE stage END,
+                        owner_username=CASE WHEN owner_username='' THEN ? ELSE owner_username END,
+                        assigned_username=CASE WHEN assigned_username='' THEN ? ELSE assigned_username END,
+                        updated_by_username=CASE WHEN updated_by_username='' THEN ? ELSE updated_by_username END
+                    WHERE id=?
+                    """,
+                    (stage, owner, assigned, updated_by, row["id"]),
+                )
+            except Exception as error:
+                logging.warning("Falha no backfill de propriedade do relatório %s: %s", row["id"], error)
+
+        db.execute("CREATE INDEX IF NOT EXISTS idx_reports_stage ON reports(stage)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_reports_owner_username ON reports(owner_username)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_reports_assigned_username ON reports(assigned_username)")
+        db.execute("CREATE INDEX IF NOT EXISTS idx_reports_created_by_user_id ON reports(created_by_user_id)")
 
 
 def password_hash(password: str) -> str:
@@ -791,6 +851,79 @@ def users_count() -> int:
         return int(db.execute("SELECT COUNT(*) FROM users").fetchone()[0])
 
 
+def save_device_heartbeat(payload: dict, user: dict) -> dict:
+    username = str(payload.get("username") or "").strip().casefold()
+    if username != str(user.get("username") or "").strip().casefold():
+        raise ReportWriteRejected(403, "heartbeat_identity_mismatch", "O usuário do dispositivo não corresponde ao usuário autenticado.")
+    device_id = str(payload.get("deviceId") or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9._:-]{8,128}", device_id):
+        raise ReportWriteRejected(422, "invalid_device_id", "Identificador do dispositivo inválido.")
+    app_version = str(payload.get("appVersion") or "").strip()
+    if not app_version or len(app_version) > 100:
+        raise ReportWriteRejected(422, "invalid_app_version", "Versão do aplicativo inválida.")
+    try:
+        client_last_seen = int(payload.get("lastSeen") or 0)
+        pending_count = int(payload.get("pendingCount") or 0)
+    except (TypeError, ValueError):
+        raise ReportWriteRejected(422, "invalid_heartbeat", "Dados numéricos do diagnóstico são inválidos.")
+    if client_last_seen <= 0 or pending_count < 0 or pending_count > 1_000_000:
+        raise ReportWriteRejected(422, "invalid_heartbeat", "Situação de sincronização inválida.")
+    raw_error = payload.get("lastError")
+    if raw_error is not None and not isinstance(raw_error, str):
+        raise ReportWriteRejected(422, "invalid_heartbeat", "Mensagem de erro inválida.")
+    last_error = str(raw_error or "").strip()[:500] or None
+    last_seen = datetime.now(timezone.utc).isoformat()
+    with connect() as db:
+        db.execute(
+            """
+            INSERT INTO device_heartbeats(
+                user_id, username, device_id, app_version, last_seen,
+                client_last_seen, pending_count, last_error
+            ) VALUES(?,?,?,?,?,?,?,?)
+            ON CONFLICT(user_id, device_id) DO UPDATE SET
+                username=excluded.username,
+                app_version=excluded.app_version,
+                last_seen=excluded.last_seen,
+                client_last_seen=excluded.client_last_seen,
+                pending_count=excluded.pending_count,
+                last_error=excluded.last_error
+            """,
+            (int(user["id"]), username, device_id, app_version, last_seen, client_last_seen, pending_count, last_error),
+        )
+    return {
+        "username": username,
+        "deviceId": device_id,
+        "appVersion": app_version,
+        "lastSeen": last_seen,
+        "pendingCount": pending_count,
+        "lastError": last_error,
+    }
+
+
+def list_device_heartbeats(user: dict) -> list[dict]:
+    where = "" if user.get("role") == "supervisor" else "WHERE d.user_id=?"
+    params: tuple = () if not where else (int(user["id"]),)
+    with connect() as db:
+        rows = db.execute(
+            f"""
+            SELECT d.username, d.device_id, d.app_version, d.last_seen,
+                   d.pending_count, d.last_error
+            FROM device_heartbeats d
+            {where}
+            ORDER BY d.last_seen DESC, d.username, d.device_id
+            """,
+            params,
+        ).fetchall()
+    return [{
+        "username": row["username"],
+        "deviceId": row["device_id"],
+        "appVersion": row["app_version"],
+        "lastSeen": row["last_seen"],
+        "pendingCount": row["pending_count"],
+        "lastError": row["last_error"],
+    } for row in rows]
+
+
 def list_users(role: str | None = None) -> list[dict]:
     where = "WHERE active=1"
     params: list[object] = []
@@ -804,30 +937,295 @@ def list_users(role: str | None = None) -> list[dict]:
         )]
 
 
-def save_report(payload: dict, created_by_user_id: int | None = None) -> str:
+class ReportWriteRejected(ValueError):
+    def __init__(self, status: int, code: str, message: str):
+        super().__init__(message)
+        self.status = status
+        self.code = code
+
+
+def reject_report(status: int, code: str, message: str) -> None:
+    raise ReportWriteRejected(status, code, message)
+
+
+def report_fields(report: dict) -> dict:
+    fields = report.get("fields")
+    return fields if isinstance(fields, dict) else {}
+
+
+def report_stage(report: dict) -> str:
+    return str(report_fields(report).get("_stage") or "rei").strip() or "rei"
+
+
+def concluded_delivery(report: dict) -> bool:
+    return str(report.get("deliveryStatus") or "").strip().casefold().startswith("conclu")
+
+
+def supervision_field(key: object) -> bool:
+    value = str(key or "")
+    return value == "_supervisorName" or value.startswith("_supervision") or value.startswith("reiField::supervisao::")
+
+
+def supervision_check(value: object) -> bool:
+    return str(value or "").startswith("supervisao::")
+
+
+def supervision_snapshot(report: dict) -> dict:
+    fields = report_fields(report)
+    return {
+        "fields": {key: fields[key] for key in sorted(fields) if supervision_field(key)},
+        "checks": sorted({str(item) for item in (report.get("checks") or []) if supervision_check(item)}),
+        "rating": str(report.get("rating") or ""),
+    }
+
+
+def without_supervision(report: dict) -> dict:
+    clean = json.loads(json.dumps(report, ensure_ascii=False))
+    fields = report_fields(clean)
+    clean["fields"] = {key: value for key, value in fields.items() if not supervision_field(key)}
+    clean["checks"] = [item for item in (clean.get("checks") or []) if not supervision_check(item)]
+    clean["rating"] = ""
+    return clean
+
+
+def evaluation_present(report: dict) -> bool:
+    snapshot = supervision_snapshot(report)
+    return bool(snapshot["checks"] or snapshot["rating"].strip() or any(str(value).strip() for value in snapshot["fields"].values()))
+
+
+def canonical(value: object) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def actor_names(user: dict) -> set[str]:
+    return {
+        str(user.get("username") or "").strip().casefold(),
+        str(user.get("full_name") or "").strip().casefold(),
+    } - {""}
+
+
+def validate_evaluation(report: dict, user: dict) -> None:
+    fields = report_fields(report)
+    score_text = str(fields.get("_supervisionScore") or "").strip().replace(",", ".")
+    try:
+        score = float(score_text)
+    except ValueError:
+        reject_report(422, "invalid_evaluation", "A nota da supervisão deve ser informada entre 0 e 10.")
+    if score < 0 or score > 10:
+        reject_report(422, "invalid_evaluation", "A nota da supervisão deve estar entre 0 e 10.")
+    if not str(fields.get("_supervisionReviewedAt") or "").strip():
+        reject_report(422, "invalid_evaluation", "A data da avaliação da supervisão é obrigatória.")
+    supervisor_name = str(fields.get("_supervisorName") or "").strip().casefold()
+    if supervisor_name not in actor_names(user):
+        reject_report(422, "invalid_evaluation", "O supervisor informado não corresponde ao usuário autenticado.")
+
+
+def ownership_values(fields: dict) -> dict[str, str]:
+    keys = ("_createdBy", "_ownerUsername", "_assignedImplantadorUsername")
+    return {key: str(fields.get(key) or "").strip().casefold() for key in keys}
+
+
+def validate_assigned_implantador(db: sqlite3.Connection, fields: dict) -> None:
+    assigned = str(fields.get("_assignedImplantadorUsername") or "").strip().casefold()
+    if not assigned:
+        reject_report(422, "invalid_assignment", "Selecione um implantador responsável pelo levantamento.")
+    found = db.execute(
+        "SELECT 1 FROM users WHERE username=? AND role='implantador' AND active=1",
+        (assigned,),
+    ).fetchone()
+    if not found:
+        reject_report(422, "invalid_assignment", "O responsável informado não é um implantador ativo.")
+
+
+def validate_supervisor_client_update(current_report: dict, received_report: dict) -> None:
+    allowed_fields = {
+        "cliente", "empresa", "contato", "telefone", "email", "cnpj", "inscricaoEstadual",
+        "_assignedImplantadorUsername", "_assignedImplantadorName",
+    }
+    current_fields = report_fields(current_report)
+    received_fields = report_fields(received_report)
+    changed_fields = {
+        key for key in set(current_fields) | set(received_fields)
+        if canonical(current_fields.get(key)) != canonical(received_fields.get(key))
+    }
+    if changed_fields - allowed_fields:
+        reject_report(403, "permission_denied", "Supervisor pode alterar somente os dados básicos e o responsável pelo levantamento.")
+    current_body = {key: value for key, value in current_report.items() if key != "fields"}
+    received_body = {key: value for key, value in received_report.items() if key != "fields"}
+    if canonical(current_body) != canonical(received_body):
+        reject_report(403, "permission_denied", "Supervisor não pode alterar o conteúdo preenchido no levantamento.")
+
+
+def validate_report_write(
+    db: sqlite3.Connection,
+    current: sqlite3.Row | None,
+    received_report: dict,
+    user: dict | None,
+    trusted_api_key: bool = False,
+) -> None:
+    if trusted_api_key:
+        return
+    if not user:
+        reject_report(403, "permission_denied", "Usuário sem permissão para salvar este relatório.")
+
+    role = str(user.get("role") or "")
+    username = str(user.get("username") or "").strip().casefold()
+    received_fields = report_fields(received_report)
+    received_stage = report_stage(received_report)
+    valid_stages = {"levantamento_pendente", "rei_pendente", "rei"}
+    if received_stage not in valid_stages:
+        reject_report(422, "invalid_stage", "Estágio do relatório inválido.")
+
+    received_evaluation = evaluation_present(received_report)
+    received_owners = ownership_values(received_fields)
+    if current is None:
+        if received_stage == "rei_pendente":
+            reject_report(422, "invalid_transition", "Um levantamento deve ser criado como pendente antes de ser concluído.")
+        if received_evaluation:
+            reject_report(422, "invalid_evaluation", "Não é possível avaliar um relatório que ainda não foi entregue.")
+        if role == "supervisor" and received_stage != "levantamento_pendente":
+            reject_report(403, "permission_denied", "Supervisor não pode criar uma implantação em nome do implantador.")
+        if role == "supervisor":
+            validate_assigned_implantador(db, received_fields)
+        if role == "implantador":
+            other_owner = next((value for value in received_owners.values() if value and value != username), "")
+            if other_owner:
+                reject_report(403, "permission_denied", "Implantador não pode criar relatório para outro responsável.")
+        return
+
+    try:
+        current_payload = json.loads(current["payload_json"] or "{}")
+    except (TypeError, json.JSONDecodeError):
+        reject_report(409, "invalid_current_state", "O relatório salvo possui um estado inválido e precisa ser revisado.")
+    current_report = current_payload.get("report") or {}
+    current_fields = report_fields(current_report)
+    current_stage = report_stage(current_report)
+    if current_stage not in valid_stages:
+        reject_report(409, "invalid_current_state", "O relatório salvo possui um estágio inválido.")
+
+    allowed_transitions = {
+        "levantamento_pendente": {"levantamento_pendente", "rei_pendente"},
+        "rei_pendente": {"rei_pendente", "rei"},
+        "rei": {"rei"},
+    }
+    if received_stage not in allowed_transitions[current_stage]:
+        stage_order = {"levantamento_pendente": 0, "rei_pendente": 1, "rei": 2}
+        if stage_order[received_stage] < stage_order[current_stage]:
+            reject_report(409, "state_conflict", f"O relatório não pode retornar de {current_stage} para {received_stage}.")
+        reject_report(422, "invalid_transition", f"Transição não permitida: {current_stage} para {received_stage}.")
+    if current_stage == "levantamento_pendente" and received_stage == "rei_pendente" and not str(received_fields.get("_surveyCompletedAt") or "").strip():
+        reject_report(422, "invalid_transition", "A conclusão do levantamento exige a data de conclusão.")
+    if current_stage == "rei_pendente" and received_stage == "rei_pendente" and canonical(current_report) != canonical(received_report):
+        reject_report(409, "survey_completed", "Levantamento concluído não pode mais ser editado.")
+    if current_stage == "rei_pendente" and received_stage == "rei":
+        transition_fields = {"_stage", "_ownerUsername"}
+        changed_survey_fields = {
+            key for key, value in current_fields.items()
+            if key not in transition_fields and canonical(received_fields.get(key)) != canonical(value)
+        }
+        if changed_survey_fields:
+            reject_report(409, "survey_completed", "As respostas do levantamento concluído não podem ser alteradas ao iniciar o R.E.I.")
+    if concluded_delivery(current_report) and not concluded_delivery(received_report):
+        reject_report(409, "report_already_completed", "Relatório concluído não pode voltar para pendente ou não concluído.")
+
+    current_supervision = supervision_snapshot(current_report)
+    received_supervision = supervision_snapshot(received_report)
+    supervision_changed = canonical(current_supervision) != canonical(received_supervision)
+    current_evaluation = evaluation_present(current_report)
+
+    created_by = str(current["created_by_username"] or "").strip().casefold()
+    current_owners = ownership_values(current_fields)
+    responsible = {created_by, *current_owners.values()} - {""}
+
+    if role == "implantador":
+        if username not in responsible:
+            reject_report(403, "not_report_owner", "Implantador não pode alterar relatório de outro implantador.")
+        for key, old_value in current_owners.items():
+            new_value = received_owners[key]
+            if old_value and new_value != old_value:
+                reject_report(403, "ownership_change_denied", "Implantador não pode alterar o responsável pelo relatório.")
+            if not old_value and new_value and new_value != username:
+                reject_report(403, "ownership_change_denied", "Implantador não pode atribuir o relatório a outro usuário.")
+        if supervision_changed:
+            reject_report(403, "supervision_only", "Somente supervisor pode alterar os campos de avaliação.")
+        return
+
+    if role != "supervisor":
+        reject_report(403, "permission_denied", "Perfil sem permissão para salvar relatórios.")
+
+    if current_stage == "levantamento_pendente":
+        if received_stage != current_stage:
+            reject_report(403, "permission_denied", "Somente o implantador responsável pode concluir o levantamento.")
+        if supervision_changed:
+            reject_report(422, "invalid_evaluation", "Levantamento pendente não pode receber avaliação.")
+        validate_assigned_implantador(db, received_fields)
+        validate_supervisor_client_update(current_report, received_report)
+        return
+
+    if not supervision_changed:
+        if canonical(current_report) == canonical(received_report):
+            return
+        reject_report(403, "permission_denied", "Supervisor não pode alterar o conteúdo técnico da implantação.")
+
+    if current_evaluation:
+        reject_report(409, "evaluation_locked", "A avaliação já foi enviada e não pode ser substituída.")
+    if current_stage != "rei" or not concluded_delivery(current_report):
+        reject_report(422, "invalid_evaluation", "Somente implantação concluída pode ser avaliada.")
+    if canonical(without_supervision(current_report)) != canonical(without_supervision(received_report)):
+        reject_report(403, "permission_denied", "A avaliação não pode alterar o conteúdo da implantação.")
+    validate_evaluation(received_report, user)
+
+
+def save_report(payload: dict, user: dict | None = None, trusted_api_key: bool = False) -> str:
     report_id = str(payload.get("reportId") or "").strip()
     report = payload.get("report") or {}
+    if not isinstance(report, dict):
+        reject_report(422, "invalid_content", "Estrutura do relatório inválida.")
     fields = report.get("fields") or {}
+    if not isinstance(fields, dict):
+        reject_report(422, "invalid_content", "Estrutura dos campos do relatório inválida.")
+    checks_value = report.get("checks") or []
+    if not isinstance(checks_value, list) or any(not isinstance(item, str) for item in checks_value):
+        reject_report(422, "invalid_content", "Estrutura do checklist do relatório inválida.")
+    attachments_value = report.get("attachments") or []
+    if not isinstance(attachments_value, list) or any(not isinstance(item, dict) for item in attachments_value):
+        reject_report(422, "invalid_content", "Estrutura dos anexos do relatório inválida.")
     if not report_id:
-        raise ValueError("reportId é obrigatório")
+        reject_report(422, "invalid_content", "reportId é obrigatório.")
     client = str(fields.get("cliente") or "").strip()
     if not client:
-        raise ValueError("cliente é obrigatório")
+        reject_report(422, "invalid_content", "Cliente é obrigatório.")
 
     now = datetime.now(timezone.utc).isoformat()
-    completed_at = int(payload.get("completedAt") or 0)
-    checks = list(dict.fromkeys(report.get("checks") or []))
-    attachments = report.get("attachments") or []
+    try:
+        completed_at = int(payload.get("completedAt") or 0)
+    except (TypeError, ValueError):
+        reject_report(422, "invalid_content", "Data de conclusão do relatório inválida.")
+    checks = list(dict.fromkeys(checks_value))
+    attachments = attachments_value
     raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    stage = report_stage(report)
+    owner_username = str(fields.get("_ownerUsername") or fields.get("_createdBy") or "").strip().casefold()
+    assigned_username = str(fields.get("_assignedImplantadorUsername") or "").strip().casefold()
+    updated_by_username = str((user or {}).get("username") or ("api" if trusted_api_key else "")).strip().casefold()
 
     with connect() as db:
+        db.execute("BEGIN IMMEDIATE")
+        current = db.execute(
+            "SELECT r.payload_json, u.username AS created_by_username "
+            "FROM reports r LEFT JOIN users u ON u.id=r.created_by_user_id WHERE r.id=?",
+            (report_id,),
+        ).fetchone()
+        validate_report_write(db, current, report, user, trusted_api_key)
+        created_by_user_id = int(user["id"]) if user and user.get("id") is not None else None
         db.execute(
             """
             INSERT INTO reports (
                 id, client, consultant, started_at, ended_at, contracted_days,
                 used_days, delivery_status, services_executed, pending_issues,
-                checked_items, completed_at, received_at, updated_at, payload_json, created_by_user_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                checked_items, completed_at, received_at, updated_at, payload_json, created_by_user_id,
+                stage, owner_username, assigned_username, updated_by_username
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 client=excluded.client,
                 consultant=excluded.consultant,
@@ -842,7 +1240,11 @@ def save_report(payload: dict, created_by_user_id: int | None = None) -> str:
                 completed_at=excluded.completed_at,
                 updated_at=excluded.updated_at,
                 payload_json=excluded.payload_json,
-                created_by_user_id=COALESCE(reports.created_by_user_id, excluded.created_by_user_id)
+                created_by_user_id=COALESCE(reports.created_by_user_id, excluded.created_by_user_id),
+                stage=excluded.stage,
+                owner_username=excluded.owner_username,
+                assigned_username=excluded.assigned_username,
+                updated_by_username=excluded.updated_by_username
             """,
             (
                 report_id, client, str(fields.get("consultor") or ""),
@@ -850,6 +1252,7 @@ def save_report(payload: dict, created_by_user_id: int | None = None) -> str:
                 fields.get("diasUtilizados"), str(report.get("deliveryStatus") or ""),
                 str(fields.get("servicosExecutados") or ""), str(fields.get("pendencias") or ""),
                 len(checks), completed_at, now, now, raw, created_by_user_id,
+                stage, owner_username, assigned_username, updated_by_username,
             ),
         )
         db.execute("DELETE FROM report_check_items WHERE report_id=?", (report_id,))
@@ -893,34 +1296,30 @@ def reports_csv() -> bytes:
 def list_reports_for_user(user: dict, limit: int = 100, full: bool = False) -> list[dict]:
     limit = min(max(limit, 1), 1000)
     select_payload = ",r.payload_json" if full else ""
-    params: list[object] = [limit]
+    where = ""
+    params: list[object] = []
+    if user["role"] != "supervisor":
+        username = str(user["username"]).strip().casefold()
+        where = (
+            "WHERE (r.created_by_user_id=? OR r.owner_username=? COLLATE NOCASE "
+            "OR r.assigned_username=? COLLATE NOCASE) "
+        )
+        params.extend((int(user["id"]), username, username))
+    params.append(limit)
     with connect() as db:
         rows = []
         for row in db.execute(
             "SELECT r.id,r.client,r.consultant,r.started_at,r.ended_at,r.delivery_status,r.checked_items,"
             "r.completed_at,r.received_at,u.username AS created_by_username,u.full_name AS created_by_name "
             f"{select_payload} FROM reports r LEFT JOIN users u ON u.id=r.created_by_user_id "
-            "ORDER BY r.completed_at DESC LIMIT ?",
+            f"{where}ORDER BY r.completed_at DESC LIMIT ?",
             params,
         ):
             item = dict(row)
             if full:
                 payload = json.loads(item.pop("payload_json") or "{}")
-                fields = (payload.get("report") or {}).get("fields") or {}
-                if user["role"] != "supervisor":
-                    username = str(user["username"]).strip().lower()
-                    created_by = str(item.get("created_by_username") or "").strip().lower()
-                    owner = str(fields.get("_ownerUsername") or "").strip().lower()
-                    assigned = str(fields.get("_assignedImplantadorUsername") or "").strip().lower()
-                    stage = str(fields.get("_stage") or "").strip()
-                    if stage == "levantamento_pendente" and assigned and assigned != username:
-                        continue
-                    if stage != "levantamento_pendente" and username not in {created_by, owner, assigned}:
-                        continue
                 item["payload"] = payload
                 item["report"] = payload.get("report") or {}
-            elif user["role"] != "supervisor" and str(item.get("created_by_username") or "").strip().lower() != str(user["username"]).strip().lower():
-                continue
             rows.append(item)
     return rows
 
@@ -1186,8 +1585,10 @@ class LegacyReiHandler(BaseHTTPRequestHandler):
             if length <= 0 or length > MAX_BODY_BYTES:
                 raise ValueError("tamanho da requisição inválido")
             payload = json.loads(self.rfile.read(length).decode("utf-8"))
-            report_id = save_report(payload)
+            report_id = save_report(payload, trusted_api_key=True)
             self.send_json(200, {"status": "saved", "reportId": report_id})
+        except ReportWriteRejected as error:
+            self.send_json(error.status, {"error": str(error), "code": error.code})
         except (ValueError, json.JSONDecodeError) as error:
             self.send_json(400, {"error": str(error)})
         except Exception:
@@ -1336,6 +1737,13 @@ class ReiHandler(BaseHTTPRequestHandler):
                 self.send_json(401, {"error": "não autorizado"})
             else:
                 self.send_json(200, {"user": user})
+            return
+        if parsed.path == "/api/device-heartbeats":
+            user = self.request_user()
+            if not user:
+                self.send_json(401, {"error": "não autorizado"})
+                return
+            self.send_json(200, list_device_heartbeats(user))
             return
         if parsed.path == "/api/reports":
             user = self.request_user() or self.api_supervisor()
@@ -1531,17 +1939,35 @@ class ReiHandler(BaseHTTPRequestHandler):
             except (ValueError, json.JSONDecodeError) as error:
                 self.send_json(400, {"error": str(error)})
             return
+        if parsed.path == "/api/device-heartbeats":
+            user = self.request_user()
+            if not user:
+                self.send_json(401, {"error": "não autorizado"})
+                return
+            try:
+                payload = json.loads(self.read_body().decode("utf-8"))
+                if not isinstance(payload, dict):
+                    raise ReportWriteRejected(422, "invalid_heartbeat", "Estrutura do diagnóstico inválida.")
+                self.send_json(200, {"status": "ok", "device": save_device_heartbeat(payload, user)})
+            except ReportWriteRejected as error:
+                self.send_json(error.status, {"error": str(error), "code": error.code})
+            except json.JSONDecodeError:
+                self.send_json(422, {"error": "JSON do diagnóstico inválido.", "code": "invalid_heartbeat"})
+            return
         if parsed.path != "/api/reports":
             self.send_json(404, {"error": "rota não encontrada"})
             return
         user = self.request_user()
-        if not user and self.headers.get("X-API-Key", "") != CONFIG.get("api_key"):
+        trusted_api_key = not user and self.headers.get("X-API-Key", "") == CONFIG.get("api_key")
+        if not user and not trusted_api_key:
             self.send_json(401, {"error": "não autorizado"})
             return
         try:
             payload = json.loads(self.read_body().decode("utf-8"))
-            report_id = save_report(payload, user["id"] if user else None)
+            report_id = save_report(payload, user, trusted_api_key)
             self.send_json(200, {"status": "saved", "reportId": report_id})
+        except ReportWriteRejected as error:
+            self.send_json(error.status, {"error": str(error), "code": error.code})
         except (ValueError, json.JSONDecodeError) as error:
             self.send_json(400, {"error": str(error)})
         except Exception:

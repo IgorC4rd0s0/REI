@@ -52,37 +52,59 @@ class ReportRepository(context: Context) {
         dao.getCompleted().map(::toSummary)
     }
 
-    fun saveHistory(items: List<ImplementationSummary>) {
-        val entities = items.map { item ->
-            ReportEntity(
-                dbId = "${ReportEntity.STATUS_COMPLETED}:${item.id}",
-                reportId = item.id,
-                status = ReportEntity.STATUS_COMPLETED,
-                client = item.client,
-                consultant = item.consultant,
-                deliveryStatus = item.deliveryStatus,
-                checkedItems = item.checkedItems,
-                completedAt = item.completedAt,
-                updatedAt = System.currentTimeMillis(),
-                payloadJson = encodeReport(item.report).toString()
-            )
-        }
+    fun upsertHistoryItem(item: ImplementationSummary) {
+        val entity = ReportEntity(
+            dbId = "${ReportEntity.STATUS_COMPLETED}:${item.id}",
+            reportId = item.id,
+            status = ReportEntity.STATUS_COMPLETED,
+            client = item.client,
+            consultant = item.consultant,
+            deliveryStatus = item.deliveryStatus,
+            checkedItems = item.checkedItems,
+            completedAt = item.completedAt,
+            updatedAt = System.currentTimeMillis(),
+            payloadJson = encodeReport(item.report).toString()
+        )
         writes.execute {
-            dao.upsertAll(entities)
+            dao.upsert(entity)
             SyncScheduler.enqueue(appContext)
         }
     }
 
-    fun syncNow() {
+    fun loadSyncDiagnostic(): SyncDiagnostic = runBlocking(Dispatchers.IO) {
+        val auth = AuthStore(appContext)
+        val roomAttempt = dao.latestSyncAttempt()
+        val storedAttempt = auth.lastSyncAttempt()
+        SyncDiagnostic(
+            serverUrl = AuthStore.normalizeServerUrl(auth.serverUrl()),
+            serverConfigured = AuthStore.normalizeServerUrl(auth.serverUrl()).isNotBlank(),
+            username = auth.currentUser()?.username,
+            userAuthenticated = auth.currentUser() != null && auth.token().isNotBlank(),
+            lastAttempt = listOfNotNull(roomAttempt, storedAttempt).maxOrNull(),
+            pendingCount = dao.countPendingSync(),
+            lastError = auth.lastSyncError() ?: dao.latestSyncError()
+        )
+    }
+
+    fun loadDeviceStatuses(): List<DeviceSyncStatus> =
+        CentralSyncClient(appContext).fetchDeviceStatuses().getOrDefault(emptyList())
+
+    fun syncNow(): SyncRunResult {
         val client = CentralSyncClient(appContext)
+        val auth = AuthStore(appContext)
+        val attempt = System.currentTimeMillis()
+        auth.beginSyncAttempt(attempt)
         var failed = false
-        client.fetchSchemaOverrides()
+        var attemptError: String? = null
+        client.fetchSchemaOverrides().onFailure { error ->
+            attemptError = error.message ?: "Não foi possível atualizar os itens dos relatórios."
+        }
         dao.getPendingSync().forEach { entity ->
-            val attempt = System.currentTimeMillis()
             client.send(entity)
                 .onSuccess { dao.updateSyncStatus(entity.dbId, ReportEntity.SYNC_SYNCED, attempt, null) }
                 .onFailure { error ->
                     failed = true
+                    attemptError = error.message ?: "Falha ao sincronizar ${entity.client}."
                     dao.updateSyncStatus(entity.dbId, ReportEntity.SYNC_ERROR, attempt, error.message?.take(500))
                 }
         }
@@ -91,7 +113,17 @@ class ReportRepository(context: Context) {
                 .onSuccess { remoteReports ->
                     if (remoteReports.isNotEmpty()) dao.upsertAll(remoteReports)
                 }
+                .onFailure { error ->
+                    attemptError = error.message ?: "Não foi possível consultar o servidor."
+                }
         }
+        val pendingCount = dao.countPendingSync()
+        client.sendHeartbeat(pendingCount, attemptError).onFailure { error ->
+            if (attemptError == null) attemptError = error.message ?: "Falha ao enviar diagnóstico ao servidor."
+        }
+        auth.finishSyncAttempt(attemptError)
+        val diagnostic = loadSyncDiagnostic()
+        return SyncRunResult(diagnostic, attemptError)
     }
 
     private fun toSummary(entity: ReportEntity): ImplementationSummary = ImplementationSummary(
@@ -101,7 +133,10 @@ class ReportRepository(context: Context) {
         completedAt = entity.completedAt ?: entity.updatedAt,
         deliveryStatus = entity.deliveryStatus,
         checkedItems = entity.checkedItems,
-        report = runCatching { decodeReport(JSONObject(entity.payloadJson)) }.getOrDefault(ReportData())
+        report = runCatching { decodeReport(JSONObject(entity.payloadJson)) }.getOrDefault(ReportData()),
+        syncStatus = entity.syncStatus,
+        lastSyncAttempt = entity.lastSyncAttempt,
+        syncError = entity.syncError
     )
 
     private fun migrateLegacyStorage() {

@@ -1,6 +1,9 @@
 package br.com.dubrasil.rei
 
 import android.app.Application
+import android.content.Context
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -9,6 +12,8 @@ import androidx.lifecycle.viewModelScope
 import br.com.dubrasil.rei.data.ReportRepository
 import br.com.dubrasil.rei.data.ReiReminderScheduler
 import br.com.dubrasil.rei.data.SchemaStore
+import br.com.dubrasil.rei.data.DeviceSyncStatus
+import br.com.dubrasil.rei.data.SyncDiagnostic
 import br.com.dubrasil.rei.model.ReportData
 import br.com.dubrasil.rei.model.ReportAttachment
 import br.com.dubrasil.rei.model.ImplementationSummary
@@ -25,6 +30,14 @@ class ReportViewModel(application: Application) : AndroidViewModel(application) 
     var history by mutableStateOf(repository.loadHistory())
         private set
     var schemaVersion by mutableStateOf(0)
+        private set
+    var serverMessage by mutableStateOf<String?>(null)
+        private set
+    var syncDiagnostic by mutableStateOf(repository.loadSyncDiagnostic())
+        private set
+    var deviceStatuses by mutableStateOf<List<DeviceSyncStatus>>(emptyList())
+        private set
+    var isSyncing by mutableStateOf(false)
         private set
 
     init {
@@ -88,7 +101,7 @@ class ReportViewModel(application: Application) : AndroidViewModel(application) 
             report = data
         )
         history = (history + summary).sortedByDescending { it.completedAt }
-        repository.saveHistory(history)
+        repository.upsertHistoryItem(summary)
         report = data
         repository.save(report)
         return id
@@ -122,7 +135,7 @@ class ReportViewModel(application: Application) : AndroidViewModel(application) 
             report = data
         )
         history = (history + summary).sortedByDescending { it.completedAt }
-        repository.saveHistory(history)
+        repository.upsertHistoryItem(summary)
     }
 
     fun updateSurveyClient(id: String, fields: Map<String, String>, supervisorUsername: String = "") {
@@ -137,10 +150,11 @@ class ReportViewModel(application: Application) : AndroidViewModel(application) 
             consultant = data.field("consultor"),
             deliveryStatus = data.deliveryStatus,
             checkedItems = deliveryChecklistCount(data),
-            report = data
+            report = data,
+            syncStatus = "PENDING"
         )
         history = (history.filterNot { it.id == id } + updated).sortedByDescending { it.completedAt }
-        repository.saveHistory(history)
+        repository.upsertHistoryItem(updated)
     }
 
     fun openSurvey(id: String) {
@@ -178,7 +192,7 @@ class ReportViewModel(application: Application) : AndroidViewModel(application) 
             report = data
         )
         history = (history.filterNot { it.id == id } + summary).sortedByDescending { it.completedAt }
-        repository.saveHistory(history)
+        repository.upsertHistoryItem(summary)
         report = data
         repository.save(report)
         if (stage == "levantamento_pendente") {
@@ -206,10 +220,11 @@ class ReportViewModel(application: Application) : AndroidViewModel(application) 
         )
         val updated = item.copy(
             checkedItems = deliveryChecklistCount(updatedReport),
-            report = updatedReport
+            report = updatedReport,
+            syncStatus = "PENDING"
         )
         history = (history.filterNot { it.id == id } + updated).sortedByDescending { it.completedAt }
-        repository.saveHistory(history)
+        repository.upsertHistoryItem(updated)
     }
 
     fun archiveCurrentReport() {
@@ -226,21 +241,63 @@ class ReportViewModel(application: Application) : AndroidViewModel(application) 
             report = report
         )
         history = (history.filterNot { it.id == id } + summary).sortedByDescending { it.completedAt }
-        repository.saveHistory(history)
+        repository.upsertHistoryItem(summary)
         report = ReportData()
         repository.clear()
     }
 
     fun refreshFromServer() {
-        viewModelScope.launch {
-            val latest = withContext(Dispatchers.IO) {
-                repository.syncNow()
-                repository.loadHistory()
+        if (hasUnmeteredNetwork()) {
+            runSynchronization(showSuccess = false)
+        } else {
+            viewModelScope.launch {
+                val local = withContext(Dispatchers.IO) {
+                    repository.loadHistory() to repository.loadSyncDiagnostic()
+                }
+                history = local.first
+                syncDiagnostic = local.second
             }
-            history = latest
-            SchemaStore(getApplication()).applyCached()
-            schemaVersion++
         }
+    }
+
+    fun synchronizeNow() {
+        runSynchronization(showSuccess = true)
+    }
+
+    private fun runSynchronization(showSuccess: Boolean) {
+        if (isSyncing) return
+        isSyncing = true
+        viewModelScope.launch {
+            try {
+                val result = withContext(Dispatchers.IO) {
+                    val run = repository.syncNow()
+                    Triple(repository.loadHistory(), run, repository.loadDeviceStatuses())
+                }
+                history = result.first
+                syncDiagnostic = result.second.diagnostic
+                deviceStatuses = result.third
+                serverMessage = result.second.attemptError ?: if (showSuccess) "Sincronização concluída." else null
+                SchemaStore(getApplication()).applyCached()
+                schemaVersion++
+            } catch (error: Exception) {
+                syncDiagnostic = withContext(Dispatchers.IO) { repository.loadSyncDiagnostic() }
+                serverMessage = error.message ?: "Não foi possível concluir a sincronização."
+            } finally {
+                isSyncing = false
+            }
+        }
+    }
+
+    private fun hasUnmeteredNetwork(): Boolean {
+        val manager = getApplication<Application>().getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        val network = manager.activeNetwork ?: return false
+        val capabilities = manager.getNetworkCapabilities(network) ?: return false
+        return capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+            capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)
+    }
+
+    fun consumeServerMessage() {
+        serverMessage = null
     }
 
     private fun deliveryChecklistCount(data: ReportData) =

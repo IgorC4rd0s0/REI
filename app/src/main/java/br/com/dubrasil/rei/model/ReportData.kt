@@ -23,5 +23,8 @@ data class ImplementationSummary(
     val completedAt: Long,
     val deliveryStatus: String,
     val checkedItems: Int,
-    val report: ReportData = ReportData()
+    val report: ReportData = ReportData(),
+    val syncStatus: String = "PENDING",
+    val lastSyncAttempt: Long? = null,
+    val syncError: String? = null
 )

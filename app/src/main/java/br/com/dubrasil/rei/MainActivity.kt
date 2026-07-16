@@ -137,7 +137,9 @@ import br.com.dubrasil.rei.model.ReportSchema
 import br.com.dubrasil.rei.data.AuthClient
 import br.com.dubrasil.rei.data.AuthStore
 import br.com.dubrasil.rei.data.AuthUser
+import br.com.dubrasil.rei.data.DeviceSyncStatus
 import br.com.dubrasil.rei.data.ReiReminderScheduler
+import br.com.dubrasil.rei.data.SyncDiagnostic
 import br.com.dubrasil.rei.pdf.PdfExporter
 import br.com.dubrasil.rei.ui.theme.ReiTheme
 import br.com.dubrasil.rei.ui.theme.ReiThemeMode
@@ -146,11 +148,11 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.launch
 import java.io.File
 import java.text.SimpleDateFormat
+import java.time.Instant
 import java.util.Calendar
 import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
-import java.time.Instant
 import java.time.LocalDate
 import java.time.YearMonth
 import java.time.ZoneId
@@ -386,6 +388,12 @@ private fun ReiApp(
     LaunchedEffect(showDashboard, authenticatedUser.username) {
         if (showDashboard) vm.refreshFromServer()
     }
+    LaunchedEffect(vm.serverMessage) {
+        vm.serverMessage?.let { message ->
+            Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+            vm.consumeServerMessage()
+        }
+    }
     val logout = {
         authStore.clear()
         currentUser = null
@@ -497,6 +505,12 @@ private fun ReiApp(
             history = vm.history,
             draft = report,
             user = authenticatedUser,
+            syncDiagnostic = vm.syncDiagnostic.copy(
+                pendingCount = vm.history.count { it.syncStatus != "SYNCED" }
+            ),
+            deviceStatuses = vm.deviceStatuses,
+            isSyncing = vm.isSyncing,
+            onSyncNow = vm::synchronizeNow,
             onLogout = logout,
             onChangePassword = { currentPassword, newPassword ->
                 authClient.changePassword(currentPassword, newPassword)
@@ -863,6 +877,10 @@ private fun DashboardScreen(
     history: List<ImplementationSummary>,
     draft: ReportData,
     user: AuthUser,
+    syncDiagnostic: SyncDiagnostic,
+    deviceStatuses: List<DeviceSyncStatus>,
+    isSyncing: Boolean,
+    onSyncNow: () -> Unit,
     onLogout: () -> Unit,
     onChangePassword: (String, String) -> Result<Unit>,
     themeMode: ReiThemeMode,
@@ -982,6 +1000,12 @@ private fun DashboardScreen(
                             )
                         }
                     }
+                }
+                Spacer(Modifier.height(18.dp))
+                SyncDiagnosticCard(syncDiagnostic, isSyncing, onSyncNow)
+                if (user.isSupervisor) {
+                    Spacer(Modifier.height(14.dp))
+                    DeviceSyncPanel(deviceStatuses)
                 }
                 Spacer(Modifier.height(18.dp))
                 Text("Resumo rápido", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = appTextColor())
@@ -1107,6 +1131,12 @@ private fun DashboardScreen(
                 Text(if (dashboardArea == "levantamentos") "Dados dos levantamentos" else "Visão geral das entregas", color = Color.White, style = MaterialTheme.typography.headlineMedium)
                 Spacer(Modifier.height(7.dp))
                 Text(if (dashboardArea == "levantamentos") "Acompanhe os levantamentos pendentes e a coleta de dados." else "Acompanhe o ritmo, histórico e avaliações dos projetos ERP.", color = Color(0xFFD9DFF6), style = MaterialTheme.typography.bodyMedium)
+            }
+            Spacer(Modifier.height(18.dp))
+            SyncDiagnosticCard(syncDiagnostic, isSyncing, onSyncNow)
+            if (user.isSupervisor) {
+                Spacer(Modifier.height(14.dp))
+                DeviceSyncPanel(deviceStatuses)
             }
             Spacer(Modifier.height(18.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -1415,6 +1445,132 @@ private fun SurveyScreen(
         }
     }
 }
+
+@Composable
+private fun SyncDiagnosticCard(
+    diagnostic: SyncDiagnostic,
+    isSyncing: Boolean,
+    onSyncNow: () -> Unit
+) {
+    val status = when {
+        diagnostic.lastError != null -> "Falha ao sincronizar"
+        diagnostic.pendingCount > 0 -> "Aguardando Wi-Fi"
+        else -> "Sincronizado"
+    }
+    val statusColor = when {
+        diagnostic.lastError != null -> MaterialTheme.colorScheme.error
+        diagnostic.pendingCount > 0 -> Color(0xFFD18A22)
+        else -> Green
+    }
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(20.dp),
+        color = appSurfaceColor(),
+        border = androidx.compose.foundation.BorderStroke(1.dp, appBorderColor())
+    ) {
+        Column(Modifier.padding(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    Modifier.size(42.dp).clip(CircleShape).background(statusColor.copy(alpha = .14f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        if (diagnostic.lastError == null && diagnostic.pendingCount == 0) Icons.Rounded.CloudDone else Icons.Outlined.Timer,
+                        contentDescription = null,
+                        tint = statusColor
+                    )
+                }
+                Spacer(Modifier.width(11.dp))
+                Column(Modifier.weight(1f)) {
+                    Text("Sincronização", fontWeight = FontWeight.Bold, color = appTextColor())
+                    Text(status, style = MaterialTheme.typography.bodySmall, color = statusColor, fontWeight = FontWeight.SemiBold)
+                }
+                Surface(color = statusColor.copy(alpha = .14f), shape = RoundedCornerShape(50)) {
+                    Text(
+                        "${diagnostic.pendingCount} pendente${if (diagnostic.pendingCount == 1) "" else "s"}",
+                        Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = statusColor
+                    )
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+            SyncDiagnosticLine("Servidor configurado", if (diagnostic.serverConfigured) diagnostic.serverUrl else "Não")
+            SyncDiagnosticLine("Usuário autenticado", diagnostic.username ?: "Não")
+            SyncDiagnosticLine("Última tentativa", formatSyncTime(diagnostic.lastAttempt))
+            diagnostic.lastError?.let {
+                Spacer(Modifier.height(6.dp))
+                Text("Último erro", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.error)
+                Text(it, style = MaterialTheme.typography.bodySmall, color = appMutedColor(), maxLines = 3)
+            }
+            Spacer(Modifier.height(12.dp))
+            Button(
+                onClick = onSyncNow,
+                enabled = !isSyncing,
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(15.dp)
+            ) {
+                Icon(Icons.Rounded.CloudDone, contentDescription = null)
+                Spacer(Modifier.width(8.dp))
+                Text(if (isSyncing) "Sincronizando..." else "Sincronizar agora", fontWeight = FontWeight.Bold)
+            }
+        }
+    }
+}
+
+@Composable
+private fun SyncDiagnosticLine(label: String, value: String) {
+    Row(Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
+        Text(label, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, color = appMutedColor())
+        Text(value, style = MaterialTheme.typography.bodySmall, color = appTextColor(), fontWeight = FontWeight.Medium, maxLines = 1)
+    }
+}
+
+@Composable
+private fun DeviceSyncPanel(devices: List<DeviceSyncStatus>) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(20.dp),
+        color = appSurfaceColor(),
+        border = androidx.compose.foundation.BorderStroke(1.dp, appBorderColor())
+    ) {
+        Column(Modifier.padding(16.dp)) {
+            Text("Dispositivos da equipe", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = appTextColor())
+            Text("Situação informada pelos aplicativos Android.", style = MaterialTheme.typography.bodySmall, color = appMutedColor())
+            Spacer(Modifier.height(10.dp))
+            if (devices.isEmpty()) {
+                Text("Nenhum dispositivo enviou diagnóstico ainda.", style = MaterialTheme.typography.bodySmall, color = appMutedColor())
+            } else {
+                devices.forEachIndexed { index, device ->
+                    val failed = !device.lastError.isNullOrBlank()
+                    val color = if (failed) MaterialTheme.colorScheme.error else if (device.pendingCount > 0) Color(0xFFD18A22) else Green
+                    Row(Modifier.fillMaxWidth().padding(vertical = 7.dp), verticalAlignment = Alignment.Top) {
+                        Box(Modifier.size(10.dp).padding(top = 3.dp).clip(CircleShape).background(color))
+                        Spacer(Modifier.width(9.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(device.username, fontWeight = FontWeight.Bold, color = appTextColor())
+                            Text("App ${device.appVersion} • ${shortDeviceId(device.deviceId)}", style = MaterialTheme.typography.bodySmall, color = appMutedColor())
+                            Text("Visto em ${formatServerSyncTime(device.lastSeen)}", style = MaterialTheme.typography.bodySmall, color = appMutedColor())
+                            device.lastError?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error, maxLines = 2) }
+                        }
+                        Text("${device.pendingCount} pend.", style = MaterialTheme.typography.labelMedium, color = color)
+                    }
+                    if (index < devices.lastIndex) HorizontalDivider(color = appBorderColor())
+                }
+            }
+        }
+    }
+}
+
+private fun formatSyncTime(value: Long?): String = value?.let {
+    SimpleDateFormat("dd/MM/yyyy HH:mm", Locale("pt", "BR")).format(Date(it))
+} ?: "Nunca"
+
+private fun formatServerSyncTime(value: String): String = runCatching {
+    formatSyncTime(Instant.parse(value).toEpochMilli())
+}.getOrDefault(value.take(16).replace('T', ' '))
+
+private fun shortDeviceId(value: String): String = if (value.length <= 12) value else "${value.take(8)}…${value.takeLast(4)}"
 
 @Composable
 private fun DashboardHeader(
@@ -2010,6 +2166,24 @@ private fun HistoryCard(item: ImplementationSummary, onClick: () -> Unit) {
                 if (item.consultant.isNotBlank()) Text(item.consultant, style = MaterialTheme.typography.bodySmall, color = appMutedColor(), maxLines = 1)
                 item.report.field("_assignedImplantadorName").ifBlank { item.report.field("_assignedImplantadorUsername") }.takeIf { it.isNotBlank() }?.let {
                     Text("Responsável: $it", style = MaterialTheme.typography.bodySmall, color = appMutedColor(), maxLines = 1)
+                }
+                Spacer(Modifier.height(5.dp))
+                val syncLabel = when (item.syncStatus) {
+                    "SYNCED" -> "Sincronizado"
+                    "ERROR" -> "Falha ao sincronizar"
+                    else -> "Aguardando Wi-Fi"
+                }
+                val syncColor = when (item.syncStatus) {
+                    "SYNCED" -> Green
+                    "ERROR" -> MaterialTheme.colorScheme.error
+                    else -> Color(0xFFD18A22)
+                }
+                Text(syncLabel, style = MaterialTheme.typography.labelMedium, color = syncColor, fontWeight = FontWeight.Bold)
+                item.lastSyncAttempt?.let {
+                    Text("Última tentativa: ${formatSyncTime(it)}", style = MaterialTheme.typography.labelSmall, color = appMutedColor())
+                }
+                item.syncError?.takeIf { it.isNotBlank() }?.let {
+                    Text(it, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error, maxLines = 2)
                 }
             }
             Surface(color = MaterialTheme.colorScheme.secondary.copy(alpha = .16f), shape = RoundedCornerShape(50)) {

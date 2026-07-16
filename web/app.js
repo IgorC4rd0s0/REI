@@ -7,6 +7,7 @@ const state = {
   user: null,
   reports: [],
   users: [],
+  deviceHeartbeats: [],
   view: "login",
   editing: null,
   step: 0,
@@ -384,7 +385,7 @@ function renderLogin(error = "") {
       applyTheme(storedThemeMode());
       state.dashboardArea = "home";
       state.dashboardFilter = "levantamentos";
-      await loadSchemaOverrides(); await loadUsers(); await loadReports(); renderDashboard(); showDailyEvaluationReminder();
+      await loadSchemaOverrides(); await loadUsers(); await loadReports(); await loadDeviceHeartbeats(); renderDashboard(); showDailyEvaluationReminder();
     } catch (err) { renderLogin(err.message); }
   };
 }
@@ -398,6 +399,9 @@ async function loadReports() {
 }
 async function loadUsers() {
   state.users = state.user?.role === "supervisor" ? await api("/api/users?role=implantador") : [];
+}
+async function loadDeviceHeartbeats() {
+  state.deviceHeartbeats = await api("/api/device-heartbeats").catch(() => []);
 }
 function assignedUsername(r) {
   return String(r?.report?.fields?._assignedImplantadorUsername || r?.payload?.report?.fields?._assignedImplantadorUsername || "").trim().toLowerCase();
@@ -441,6 +445,7 @@ function renderDashboardHome() {
         <b>${surveys.length}</b>
       </button>
     </section>
+    ${deviceSyncPanel()}
     <div class="section-title"><h2>Resumo rápido</h2></div>
     <section class="grid metrics">
       ${metric("Implantações", implementations.length, "briefcase")}
@@ -485,6 +490,7 @@ function renderDashboardArea() {
       <h1>${isSurveyArea ? "Levantamentos" : "Implantação"}</h1>
       <p>${isSurveyArea ? "Dashboard e informações dos levantamentos destinados ao implantador." : "Dashboard, informações das implantações e avaliação das implantações entregues."}</p>
     </section>
+    ${deviceSyncPanel()}
     <section class="grid metrics">
       ${isSurveyArea
         ? `${metric("Levantamentos pendentes", surveys.length, "file")}${metric("Levantamentos concluídos", completedSurveys.length, "calendar")}${metric("Último levantamento", completedSurveys[0] ? fmtDate(surveyCompletedAt(completedSurveys[0])) : "-", "calendar")}`
@@ -558,6 +564,33 @@ function renderDashboard() {
     ${state.user.role !== "supervisor" ? `<div class="footer-actions no-print"><button class="btn secondary" data-action="new-survey">${icon("file")}Novo levantamento</button><button class="btn" data-action="new">${icon("plus")}Nova implantação</button></div>` : ""}`);
 }
 function metric(label, value, iconName = "file") { return `<div class="card metric"><span class="metric-icon">${icon(iconName)}</span><span>${esc(label)}</span><b>${esc(value)}</b></div>`; }
+function deviceSyncPanel() {
+  if (state.user?.role !== "supervisor") return "";
+  const devices = state.deviceHeartbeats || [];
+  const rows = devices.map(device => {
+    const failed = Boolean(device.lastError);
+    const status = failed ? "Falha ao sincronizar" : Number(device.pendingCount) > 0 ? "Aguardando sincronização" : "Sincronizado";
+    const statusClass = failed ? "failed" : Number(device.pendingCount) > 0 ? "pending" : "synced";
+    const seen = device.lastSeen ? new Date(device.lastSeen).toLocaleString("pt-BR") : "Nunca";
+    const shortId = String(device.deviceId || "").length > 14
+      ? `${String(device.deviceId).slice(0, 8)}…${String(device.deviceId).slice(-4)}`
+      : String(device.deviceId || "-");
+    return `<article class="sync-device ${statusClass}">
+      <span class="sync-dot" aria-hidden="true"></span>
+      <div class="sync-device-main">
+        <strong>${esc(device.username || "Usuário")}</strong>
+        <small>App ${esc(device.appVersion || "-")} · ${esc(shortId)}</small>
+        <small>Último contato: ${esc(seen)}</small>
+        ${device.lastError ? `<p>${esc(device.lastError)}</p>` : ""}
+      </div>
+      <div class="sync-device-state"><b>${esc(status)}</b><span>${Number(device.pendingCount) || 0} pendente(s)</span></div>
+    </article>`;
+  }).join("");
+  return `<section class="card sync-panel">
+    <div class="sync-panel-title"><div><h2>Sincronização dos dispositivos</h2><p>Situação enviada pelos aplicativos Android da equipe.</p></div><span>${devices.length} dispositivo(s)</span></div>
+    <div class="sync-device-list">${rows || `<p class="muted">Nenhum dispositivo enviou diagnóstico ainda.</p>`}</div>
+  </section>`;
+}
 function workflowCard(group, active) {
   return `<button type="button" class="card metric workflow-card ${active ? "active" : ""}" data-action="dashboard-filter" data-filter="${esc(group.key)}">
     <span class="metric-icon">${icon(group.icon)}</span>
@@ -1116,8 +1149,8 @@ document.addEventListener("click", async e => {
         option.setAttribute("aria-checked", String(selected));
       });
     }
-    if (action === "dashboard") { await loadUsers(); await loadReports(); renderDashboard(); }
-    if (action === "dashboard-home") { state.dashboardArea = "home"; state.dashboardFilter = "levantamentos"; renderDashboard(); }
+    if (action === "dashboard") { await loadUsers(); await loadReports(); await loadDeviceHeartbeats(); renderDashboard(); }
+    if (action === "dashboard-home") { state.dashboardArea = "home"; state.dashboardFilter = "levantamentos"; await loadDeviceHeartbeats(); renderDashboard(); }
     if (action === "dashboard-area") { state.dashboardArea = a.dataset.area || "implantacoes"; state.dashboardFilter = state.dashboardArea === "levantamentos" ? "levantamentos" : "pendentes"; renderDashboard(); }
     if (action === "new" && state.user.role !== "supervisor") renderEditor(blankReport());
     if (action === "new-survey" && state.user.role !== "supervisor") renderSurvey(blankSurveyPayload());
@@ -1200,7 +1233,7 @@ document.addEventListener("click", async e => {
 
 (async function init() {
   if (await loadMe()) {
-    applyTheme(storedThemeMode()); await loadSchemaOverrides(); await loadUsers(); await loadReports(); renderDashboard();
+    applyTheme(storedThemeMode()); await loadSchemaOverrides(); await loadUsers(); await loadReports(); await loadDeviceHeartbeats(); renderDashboard();
     if (window.location.hash === "#settings") {
       history.replaceState(null, "", window.location.pathname + window.location.search);
       renderAccountSettings();

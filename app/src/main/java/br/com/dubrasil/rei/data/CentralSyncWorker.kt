@@ -15,23 +15,40 @@ class CentralSyncWorker(context: Context, params: WorkerParameters) : Worker(con
     override fun doWork(): Result {
         val dao = ReiDatabase.getInstance(applicationContext).reportDao()
         val client = CentralSyncClient(applicationContext)
-        var failed = false
-        client.fetchSchemaOverrides()
+        val auth = AuthStore(applicationContext)
+        val attempt = System.currentTimeMillis()
+        auth.beginSyncAttempt(attempt)
+        var sendFailed = false
+        var retryRequired = false
+        var lastError: String? = null
+        client.fetchSchemaOverrides().onFailure { error ->
+            lastError = error.message ?: "Não foi possível atualizar os itens dos relatórios."
+            retryRequired = true
+        }
         dao.getPendingSync().forEach { entity ->
-            val attempt = System.currentTimeMillis()
             client.send(entity)
                 .onSuccess { dao.updateSyncStatus(entity.dbId, ReportEntity.SYNC_SYNCED, attempt, null) }
                 .onFailure { error ->
-                    failed = true
+                    sendFailed = true
+                    lastError = error.message ?: "Falha ao sincronizar ${entity.client}."
+                    retryRequired = retryRequired || error !is ServerReportException
                     dao.updateSyncStatus(
                         entity.dbId,
                         ReportEntity.SYNC_ERROR,
                         attempt,
                         error.message?.take(500)
                     )
+                    if (error is ServerReportException) {
+                        ReiNotifier.notify(
+                            applicationContext,
+                            entity.reportId.hashCode(),
+                            "Relatório não sincronizado",
+                            error.message ?: "O servidor rejeitou a alteração do relatório."
+                        )
+                    }
                 }
         }
-        if (!failed) {
+        if (!sendFailed) {
             val existingIds = dao.getCompleted().map { it.reportId }.toSet()
             client.fetchCompletedReports()
                 .onSuccess { remoteReports ->
@@ -58,9 +75,18 @@ class CentralSyncWorker(context: Context, params: WorkerParameters) : Worker(con
                         }
                     }
                 }
-                .onFailure { failed = true }
+                .onFailure { error ->
+                    lastError = error.message ?: "Não foi possível consultar o servidor."
+                    retryRequired = true
+                }
         }
-        return if (failed) Result.retry() else Result.success()
+        val pendingCount = dao.countPendingSync()
+        client.sendHeartbeat(pendingCount, lastError).onFailure { error ->
+            if (lastError == null) lastError = error.message ?: "Falha ao enviar diagnóstico ao servidor."
+            retryRequired = retryRequired || error !is ServerReportException
+        }
+        auth.finishSyncAttempt(lastError)
+        return if (retryRequired) Result.retry() else Result.success()
     }
 }
 

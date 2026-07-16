@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
+import br.com.dubrasil.rei.BuildConfig
 import br.com.dubrasil.rei.model.ReportSchema
 import org.json.JSONArray
 import org.json.JSONObject
@@ -11,6 +12,8 @@ import java.io.ByteArrayOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.Base64
+
+class ServerReportException(val statusCode: Int, message: String) : IllegalStateException(message)
 
 class CentralSyncClient(private val context: Context) {
     private val auth = AuthStore(context)
@@ -38,8 +41,10 @@ class CentralSyncClient(private val context: Context) {
             connection.outputStream.use { it.write(payload.toByteArray(Charsets.UTF_8)) }
             val responseCode = connection.responseCode
             if (responseCode !in 200..299) {
-                val message = connection.errorStream?.bufferedReader()?.use { it.readText() }.orEmpty()
-                error("Servidor respondeu HTTP $responseCode: $message")
+                val body = connection.errorStream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
+                val message = runCatching { JSONObject(body).optString("error") }.getOrDefault("")
+                    .ifBlank { "Servidor respondeu HTTP $responseCode" }
+                throw ServerReportException(responseCode, message)
             }
         } finally {
             connection.disconnect()
@@ -182,5 +187,72 @@ class CentralSyncClient(private val context: Context) {
         } finally {
             connection.disconnect()
         }
+    }
+
+    fun sendHeartbeat(pendingCount: Int, lastError: String?): Result<Unit> = runCatching {
+        val baseUrl = AuthStore.normalizeServerUrl(auth.serverUrl())
+        val user = auth.currentUser() ?: error("Usuário não autenticado")
+        require(baseUrl.isNotBlank()) { "Servidor central não configurado" }
+        require(auth.token().isNotBlank()) { "Usuário não autenticado" }
+        val body = JSONObject()
+            .put("username", user.username)
+            .put("deviceId", auth.deviceId())
+            .put("appVersion", BuildConfig.VERSION_NAME)
+            .put("lastSeen", System.currentTimeMillis())
+            .put("pendingCount", pendingCount.coerceAtLeast(0))
+            .put("lastError", lastError.orEmpty().take(500))
+            .toString()
+        authenticatedJsonConnection("$baseUrl/api/device-heartbeats", "POST", body).also { response ->
+            if (response.first !in 200..299) throw serverException(response.first, response.second)
+        }
+    }
+
+    fun fetchDeviceStatuses(): Result<List<DeviceSyncStatus>> = runCatching {
+        val baseUrl = AuthStore.normalizeServerUrl(auth.serverUrl())
+        require(baseUrl.isNotBlank()) { "Servidor central não configurado" }
+        require(auth.token().isNotBlank()) { "Usuário não autenticado" }
+        val (status, body) = authenticatedJsonConnection("$baseUrl/api/device-heartbeats", "GET")
+        if (status !in 200..299) throw serverException(status, body)
+        val array = JSONArray(body)
+        (0 until array.length()).map { index ->
+            val item = array.getJSONObject(index)
+            DeviceSyncStatus(
+                username = item.optString("username"),
+                deviceId = item.optString("deviceId"),
+                appVersion = item.optString("appVersion"),
+                lastSeen = item.optString("lastSeen"),
+                pendingCount = item.optInt("pendingCount"),
+                lastError = item.optString("lastError").takeIf { it.isNotBlank() }
+            )
+        }
+    }
+
+    private fun authenticatedJsonConnection(url: String, method: String, body: String? = null): Pair<Int, String> {
+        val connection = (URL(url).openConnection() as HttpURLConnection).apply {
+            requestMethod = method
+            connectTimeout = 6_000
+            readTimeout = 10_000
+            setRequestProperty("Accept", "application/json")
+            setRequestProperty("Authorization", "Bearer ${auth.token()}")
+            if (body != null) {
+                doOutput = true
+                setRequestProperty("Content-Type", "application/json; charset=utf-8")
+            }
+        }
+        return try {
+            if (body != null) connection.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+            val status = connection.responseCode
+            val response = (if (status in 200..299) connection.inputStream else connection.errorStream)
+                ?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
+            status to response
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    private fun serverException(status: Int, body: String): ServerReportException {
+        val message = runCatching { JSONObject(body).optString("error") }.getOrDefault("")
+            .ifBlank { "Servidor respondeu HTTP $status" }
+        return ServerReportException(status, message)
     }
 }

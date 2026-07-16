@@ -2,6 +2,7 @@ package br.com.dubrasil.rei.data
 
 import android.content.Context
 import br.com.dubrasil.rei.BuildConfig
+import java.util.UUID
 
 data class AuthUser(
     val id: Int,
@@ -19,6 +20,25 @@ class AuthStore(context: Context) {
 
     fun token(): String = prefs.getString("token", "").orEmpty()
     fun serverUrl(): String = prefs.getString("server_url", BuildConfig.CENTRAL_API_URL).orEmpty()
+
+    fun deviceId(): String {
+        prefs.getString("device_id", "")?.takeIf { it.isNotBlank() }?.let { return it }
+        return UUID.randomUUID().toString().also { prefs.edit().putString("device_id", it).commit() }
+    }
+
+    fun beginSyncAttempt(attempt: Long = System.currentTimeMillis()) {
+        prefs.edit().putLong("last_sync_attempt", attempt).apply()
+    }
+
+    fun finishSyncAttempt(error: String?) {
+        prefs.edit().apply {
+            if (error.isNullOrBlank()) remove("last_sync_error")
+            else putString("last_sync_error", error.take(500))
+        }.apply()
+    }
+
+    fun lastSyncAttempt(): Long? = prefs.getLong("last_sync_attempt", 0L).takeIf { it > 0L }
+    fun lastSyncError(): String? = prefs.getString("last_sync_error", null)?.takeIf { it.isNotBlank() }
 
     fun saveServerUrl(value: String) {
         prefs.edit().putString("server_url", normalizeServerUrl(value)).apply()
@@ -49,7 +69,17 @@ class AuthStore(context: Context) {
 
     fun clear() {
         val currentServer = serverUrl()
-        prefs.edit().clear().putString("server_url", currentServer).apply()
+        val currentDeviceId = deviceId()
+        val attempt = lastSyncAttempt()
+        val error = lastSyncError()
+        prefs.edit().clear()
+            .putString("server_url", currentServer)
+            .putString("device_id", currentDeviceId)
+            .apply {
+                attempt?.let { putLong("last_sync_attempt", it) }
+                error?.let { putString("last_sync_error", it) }
+            }
+            .apply()
     }
 
     companion object {

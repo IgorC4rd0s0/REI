@@ -16,6 +16,15 @@ interface ReportDao {
     @Query("SELECT * FROM reports WHERE status = 'COMPLETED' AND syncStatus != 'SYNCED' ORDER BY updatedAt ASC")
     fun getPendingSync(): List<ReportEntity>
 
+    @Query("SELECT COUNT(*) FROM reports WHERE status = 'COMPLETED' AND syncStatus != 'SYNCED'")
+    fun countPendingSync(): Int
+
+    @Query("SELECT MAX(lastSyncAttempt) FROM reports WHERE status = 'COMPLETED'")
+    fun latestSyncAttempt(): Long?
+
+    @Query("SELECT syncError FROM reports WHERE status = 'COMPLETED' AND syncError IS NOT NULL AND syncError != '' ORDER BY COALESCE(lastSyncAttempt, updatedAt) DESC LIMIT 1")
+    fun latestSyncError(): String?
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     fun upsert(report: ReportEntity)
 
