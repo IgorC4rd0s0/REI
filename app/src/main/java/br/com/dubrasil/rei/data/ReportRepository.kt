@@ -35,20 +35,7 @@ class ReportRepository(context: Context) {
     }
 
     fun save(data: ReportData) {
-        val reportId = data.field("_id").ifBlank { "active_draft" }
-        val entity = ReportEntity(
-            dbId = "${ReportEntity.STATUS_DRAFT}:$reportId",
-            reportId = reportId,
-            status = ReportEntity.STATUS_DRAFT,
-            client = data.field("cliente"),
-            consultant = data.field("consultor"),
-            deliveryStatus = data.deliveryStatus,
-            checkedItems = data.checks.size,
-            completedAt = null,
-            updatedAt = System.currentTimeMillis(),
-            payloadJson = encodeReport(data).toString()
-        )
-        writes.execute { dao.upsert(entity) }
+        writes.execute { dao.upsert(toDraftEntity(data)) }
     }
 
     fun clear() {
@@ -60,22 +47,39 @@ class ReportRepository(context: Context) {
     }
 
     fun upsertHistoryItem(item: ImplementationSummary) {
-        val entity = ReportEntity(
-            dbId = "${ReportEntity.STATUS_COMPLETED}:${item.id}",
-            reportId = item.id,
-            status = ReportEntity.STATUS_COMPLETED,
-            client = item.client,
-            consultant = item.consultant,
-            deliveryStatus = item.deliveryStatus,
-            checkedItems = item.checkedItems,
-            completedAt = item.completedAt,
-            updatedAt = System.currentTimeMillis(),
-            payloadJson = encodeReport(item.report).toString()
-        )
         writes.execute {
-            dao.upsert(entity)
+            dao.upsert(toHistoryEntity(item))
             SyncScheduler.enqueue(appContext)
         }
+    }
+
+    /** Confirma o rascunho no Room antes de a interface sair da tela de levantamento. */
+    fun persistSurveyDraft(item: ImplementationSummary): Result<Unit> = runWriteAndWait {
+        val history = toHistoryEntity(item)
+        val draft = toDraftEntity(item.report)
+        dao.upsertHistoryAndDraft(history, draft)
+        check(dao.getCompletedByReportId(item.id)?.payloadJson == history.payloadJson) {
+            "O levantamento não foi confirmado no histórico local."
+        }
+        check(dao.getDraft()?.payloadJson == draft.payloadJson) {
+            "O rascunho do levantamento não foi confirmado no armazenamento local."
+        }
+    }.onSuccess {
+        SyncScheduler.enqueue(appContext)
+    }
+
+    /** Conclui o levantamento e remove o rascunho na mesma transação local. */
+    fun persistCompletedSurvey(item: ImplementationSummary): Result<Unit> = runWriteAndWait {
+        val history = toHistoryEntity(item)
+        dao.upsertHistoryAndDeleteDraft(history)
+        check(dao.getCompletedByReportId(item.id)?.payloadJson == history.payloadJson) {
+            "O levantamento concluído não foi confirmado no armazenamento local."
+        }
+        check(dao.getDraft() == null) {
+            "O rascunho permaneceu aberto após a conclusão do levantamento."
+        }
+    }.onSuccess {
+        SyncScheduler.enqueue(appContext)
     }
 
     fun loadSyncDiagnostic(): SyncDiagnostic = runBlocking(Dispatchers.IO) {
@@ -148,6 +152,39 @@ class ReportRepository(context: Context) {
         lastSyncAttempt = entity.lastSyncAttempt,
         syncError = entity.syncError
     )
+
+    private fun toDraftEntity(data: ReportData): ReportEntity {
+        val reportId = data.field("_id").ifBlank { "active_draft" }
+        return ReportEntity(
+            dbId = "${ReportEntity.STATUS_DRAFT}:$reportId",
+            reportId = reportId,
+            status = ReportEntity.STATUS_DRAFT,
+            client = data.field("cliente"),
+            consultant = data.field("consultor"),
+            deliveryStatus = data.deliveryStatus,
+            checkedItems = data.checks.size,
+            completedAt = null,
+            updatedAt = System.currentTimeMillis(),
+            payloadJson = encodeReport(data).toString()
+        )
+    }
+
+    private fun toHistoryEntity(item: ImplementationSummary) = ReportEntity(
+        dbId = "${ReportEntity.STATUS_COMPLETED}:${item.id}",
+        reportId = item.id,
+        status = ReportEntity.STATUS_COMPLETED,
+        client = item.client,
+        consultant = item.consultant,
+        deliveryStatus = item.deliveryStatus,
+        checkedItems = item.checkedItems,
+        completedAt = item.completedAt,
+        updatedAt = System.currentTimeMillis(),
+        payloadJson = encodeReport(item.report).toString()
+    )
+
+    private fun runWriteAndWait(block: () -> Unit): Result<Unit> = runCatching {
+        writes.submit(block).get()
+    }
 
     private fun migrateLegacyStorage() {
         if (legacyPrefs.getBoolean("room_migration_done", false)) return

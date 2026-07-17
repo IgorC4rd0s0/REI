@@ -13,6 +13,7 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
 import java.util.Base64
+import java.util.Locale
 
 /** Erro de regra ou permissão devolvido pela API, que não deve ser tratado como falha de rede. */
 class ServerReportException(
@@ -230,11 +231,26 @@ class CentralSyncClient(private val context: Context) {
         require(auth.token().isNotBlank()) { "Usuário não autenticado" }
         val (status, body) = authenticatedJsonConnection("$baseUrl/api/device-heartbeats", "GET")
         if (status !in 200..299) throw serverException(status, body)
+        val registeredNames = runCatching {
+            val (usersStatus, usersBody) = authenticatedJsonConnection("$baseUrl/api/users?role=implantador", "GET")
+            if (usersStatus !in 200..299) emptyMap() else {
+                val users = JSONArray(usersBody)
+                (0 until users.length()).associate { index ->
+                    val user = users.getJSONObject(index)
+                    user.optString("username").lowercase(Locale.ROOT) to
+                        user.optString("full_name").ifBlank { user.optString("fullName") }
+                }
+            }
+        }.getOrDefault(emptyMap())
         val array = JSONArray(body)
         (0 until array.length()).map { index ->
             val item = array.getJSONObject(index)
+            val username = item.optString("username")
             DeviceSyncStatus(
-                username = item.optString("username"),
+                username = username,
+                fullName = item.optString("fullName").ifBlank {
+                    registeredNames[username.lowercase(Locale.ROOT)].orEmpty().ifBlank { username }
+                },
                 deviceId = item.optString("deviceId"),
                 appVersion = item.optString("appVersion"),
                 lastSeen = item.optString("lastSeen"),

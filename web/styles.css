@@ -2238,11 +2238,12 @@ body {
 }
 
 .hub-hero,
-.area-hero {
+.area-hero,
+.hero.has-top-action {
   position: relative;
 }
 
-.area-back {
+.page-back {
   position: absolute;
   right: 18px;
   top: 18px;
@@ -2347,9 +2348,29 @@ body {
     grid-template-columns: 1fr;
   }
 
-  .area-back {
+  .page-back {
     position: static;
     margin-bottom: 14px;
+  }
+}
+
+.hero.has-top-action {
+  padding-right: 140px;
+}
+
+.page-heading {
+  position: relative;
+  min-height: 44px;
+  padding-right: 120px;
+}
+
+@media(max-width:860px) {
+  .hero.has-top-action {
+    padding-right: 22px;
+  }
+
+  .page-heading {
+    padding-right: 0;
   }
 }
 
@@ -2651,7 +2672,7 @@ body {
 
 .sync-panel {
   margin: 16px 0;
-  padding: 18px
+  padding: 14px
 }
 
 .sync-panel-title {
@@ -2659,7 +2680,7 @@ body {
   align-items: flex-start;
   justify-content: space-between;
   gap: 16px;
-  margin-bottom: 12px
+  margin-bottom: 8px
 }
 
 .sync-panel-title h2 {
@@ -2680,24 +2701,32 @@ body {
 
 .sync-device-list {
   display: grid;
-  gap: 9px
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 165px), 180px));
+  gap: 8px;
+  align-items: stretch
 }
 
 .sync-device {
   display: grid;
-  grid-template-columns: 12px minmax(0, 1fr) auto;
-  gap: 12px;
-  align-items: start;
-  padding: 12px;
+  grid-template-columns: 10px minmax(0, 1fr);
+  grid-template-areas:
+    "dot main"
+    "state state";
+  column-gap: 9px;
+  row-gap: 6px;
+  align-content: start;
+  min-width: 0;
+  padding: 9px 10px 8px;
   border: 1px solid var(--line);
   border-radius: 14px;
   background: var(--card)
 }
 
 .sync-dot {
+  grid-area: dot;
   width: 10px;
   height: 10px;
-  margin-top: 5px;
+  margin-top: 4px;
   border-radius: 50%;
   background: var(--green)
 }
@@ -2711,13 +2740,29 @@ body {
 }
 
 .sync-device-main {
+  grid-area: main;
   display: grid;
   gap: 2px;
   min-width: 0
 }
 
+.sync-device-main strong {
+  overflow: hidden;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap
+}
+
 .sync-device-main small {
-  color: var(--muted)
+  color: var(--muted);
+  font-size: 11px
+}
+
+.sync-device-main time {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap
 }
 
 .sync-device-main p {
@@ -2727,9 +2772,16 @@ body {
 }
 
 .sync-device-state {
-  display: grid;
-  gap: 3px;
-  text-align: right
+  grid-area: state;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  justify-content: space-between;
+  min-width: 0;
+  margin-top: 1px;
+  padding-top: 6px;
+  border-top: 1px solid var(--line);
+  text-align: left
 }
 
 .sync-device-state b {
@@ -2781,16 +2833,8 @@ body {
     display: grid
   }
 
-  .sync-device {
-    grid-template-columns: 12px minmax(0, 1fr)
-  }
-
-  .sync-device-state {
-    grid-column: 2;
-    text-align: left;
-    display: flex;
-    gap: 8px;
-    align-items: center
+  .sync-device-list {
+    grid-template-columns: 1fr
   }
 }
 

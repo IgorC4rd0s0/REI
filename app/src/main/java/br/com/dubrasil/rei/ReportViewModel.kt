@@ -179,25 +179,27 @@ class ReportViewModel(application: Application) : AndroidViewModel(application) 
         report = item.report.copy(fields = item.report.fields + ("_id" to id))
     }
 
-    fun saveSurveyDraft() {
-        saveCurrentStage("levantamento_pendente")
-    }
+    fun saveSurveyDraft(): Result<ImplementationSummary> = persistSurvey("levantamento_pendente")
 
-    fun completeSurvey() {
+    fun completeSurvey(): Result<ImplementationSummary> {
+        val missing = ReportSchema.validateRequiredRequirements(report, ReportSchema.PHASE_SURVEY)
+        if (missing.isNotEmpty()) {
+            return Result.failure(IllegalStateException("Existem itens obrigatórios pendentes."))
+        }
         val snapshot = ReportSchema.validationSnapshot(report, ReportSchema.PHASE_SURVEY)
-        report = report.copy(fields = report.fields + ("_requiredValidationSnapshot" to snapshot))
-        saveCurrentStage("rei_pendente")
-        report = ReportData()
-        repository.clear()
+        return persistSurvey(
+            "rei_pendente",
+            report.copy(fields = report.fields + ("_requiredValidationSnapshot" to snapshot))
+        )
     }
 
-    private fun saveCurrentStage(stage: String) {
-        val id = report.field("_id").ifBlank { UUID.randomUUID().toString() }
+    private fun persistSurvey(stage: String, source: ReportData = report): Result<ImplementationSummary> {
+        val id = source.field("_id").ifBlank { UUID.randomUUID().toString() }
         val now = System.currentTimeMillis()
-        val data = report.copy(fields = report.fields + buildMap {
+        val data = source.copy(fields = source.fields + buildMap {
             put("_id", id)
             put("_stage", stage)
-            put("cliente", report.field("cliente").ifBlank { report.field("empresa") })
+            put("cliente", source.field("cliente").ifBlank { source.field("empresa") })
             if (stage == "rei_pendente") put("_surveyCompletedAt", now.toString())
         })
         val existing = history.firstOrNull { it.id == id }
@@ -210,17 +212,24 @@ class ReportViewModel(application: Application) : AndroidViewModel(application) 
             checkedItems = deliveryChecklistCount(data),
             report = data
         )
-        history = (history.filterNot { it.id == id } + summary).sortedByDescending { it.completedAt }
-        repository.upsertHistoryItem(summary)
-        report = data
-        repository.save(report)
-        if (stage == "levantamento_pendente") {
-            ReiReminderScheduler.scheduleSurveyReminder(
-                getApplication(),
-                id,
-                data.field("cliente").ifBlank { data.field("empresa") },
-                data.field("_surveyScheduledAt")
-            )
+        val persisted = if (stage == "rei_pendente") {
+            repository.persistCompletedSurvey(summary)
+        } else {
+            repository.persistSurveyDraft(summary)
+        }
+        return persisted.map {
+            history = (history.filterNot { item -> item.id == id } + summary)
+                .sortedByDescending { item -> item.completedAt }
+            report = if (stage == "rei_pendente") ReportData() else data
+            if (stage == "levantamento_pendente") {
+                ReiReminderScheduler.scheduleSurveyReminder(
+                    getApplication(),
+                    id,
+                    data.field("cliente").ifBlank { data.field("empresa") },
+                    data.field("_surveyScheduledAt")
+                )
+            }
+            summary
         }
     }
 

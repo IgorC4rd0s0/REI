@@ -12,6 +12,7 @@ import android.provider.OpenableColumns
 import android.app.TimePickerDialog
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -87,8 +88,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
@@ -481,17 +480,34 @@ private fun ReiApp(
             data = report,
             vm = vm,
             onBack = { surveyReportId = null },
+            onLogout = logout,
+            onChangePassword = { currentPassword, newPassword ->
+                authClient.changePassword(currentPassword, newPassword)
+            },
+            themeMode = themeMode,
+            onThemeModeChange = onThemeModeChange,
             onSave = {
                 vm.saveSurveyDraft()
-                surveyReportId = null
-                showDashboard = true
-                Toast.makeText(context, "Levantamento salvo", Toast.LENGTH_LONG).show()
+                    .onSuccess {
+                        surveyReportId = null
+                        showDashboard = true
+                        Toast.makeText(context, "Levantamento salvo no dispositivo", Toast.LENGTH_LONG).show()
+                    }
+                    .onFailure { error ->
+                        Toast.makeText(context, "Não foi possível gravar o levantamento: ${error.message.orEmpty()}", Toast.LENGTH_LONG).show()
+                    }
             },
             onComplete = {
                 vm.completeSurvey()
-                surveyReportId = null
-                showDashboard = true
-                Toast.makeText(context, "Levantamento concluído. Implantação liberada para R.E.I.", Toast.LENGTH_LONG).show()
+                    .onSuccess { completed ->
+                        surveyReportId = null
+                        showDashboard = true
+                        Toast.makeText(context, "Levantamento salvo no dispositivo e liberado para R.E.I.", Toast.LENGTH_LONG).show()
+                        exportAndSharePdf(surveyPdfFileName(completed.client), completed.report, false)
+                    }
+                    .onFailure { error ->
+                        Toast.makeText(context, "Não foi possível concluir o levantamento: ${error.message.orEmpty()}", Toast.LENGTH_LONG).show()
+                    }
             }
         )
         return
@@ -501,6 +517,12 @@ private fun ReiApp(
             item = viewedReport,
             surveyMode = viewingSurveyReadOnly,
             onBack = { viewingReportId = null; viewingSurveyReadOnly = false },
+            onLogout = logout,
+            onChangePassword = { currentPassword, newPassword ->
+                authClient.changePassword(currentPassword, newPassword)
+            },
+            themeMode = themeMode,
+            onThemeModeChange = onThemeModeChange,
             onEdit = if (!viewingSurveyReadOnly && !authenticatedUser.isSupervisor) ({
                 vm.editCompletedReport(viewedReport.id, authenticatedUser.username)
                 viewingReportId = null
@@ -599,7 +621,12 @@ private fun ReiApp(
             ReiTopBar(
                 onHome = { showDashboard = true },
                 onNewReport = { confirmClear = true },
-                onLogout = logout
+                onLogout = logout,
+                onChangePassword = { currentPassword, newPassword ->
+                    authClient.changePassword(currentPassword, newPassword)
+                },
+                themeMode = themeMode,
+                onThemeModeChange = onThemeModeChange
             )
         },
         bottomBar = {
@@ -1392,25 +1419,47 @@ private fun SurveyScreen(
     data: ReportData,
     vm: ReportViewModel,
     onBack: () -> Unit,
+    onLogout: () -> Unit,
+    onChangePassword: (String, String) -> Result<Unit>,
+    themeMode: ReiThemeMode,
+    onThemeModeChange: (ReiThemeMode) -> Unit,
     onSave: () -> Unit,
     onComplete: () -> Unit
 ) {
     var surveyStep by rememberSaveable(data.field("_id")) { mutableIntStateOf(0) }
     var missingRequirements by remember { mutableStateOf<List<RequiredRequirement>>(emptyList()) }
+    val context = androidx.compose.ui.platform.LocalContext.current
     val sections = remember(vm.schemaVersion) { activeSurveySections() }
     val currentIndex = surveyStep.coerceIn(0, sections.lastIndex)
     val currentSection = sections[currentIndex]
     val progress = (currentIndex + 1f) / sections.size
+    fun persistThen(action: () -> Unit) {
+        vm.saveSurveyDraft()
+            .onSuccess { action() }
+            .onFailure { error ->
+                Toast.makeText(
+                    context,
+                    "Não foi possível salvar antes de trocar de etapa: ${error.message.orEmpty()}",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+    }
+    fun goToStep(index: Int) {
+        val target = index.coerceIn(0, sections.lastIndex)
+        if (target != currentIndex) persistThen { surveyStep = target }
+    }
+    BackHandler { persistThen(onBack) }
     Scaffold(
         containerColor = appPageColor(),
         topBar = {
             Surface(modifier = Modifier.statusBarsPadding(), color = appSurfaceColor(), shadowElevation = 1.dp) {
                 Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "Voltar") }
+                    IconButton(onClick = { persistThen(onBack) }) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "Voltar") }
                     Column(Modifier.weight(1f)) {
                         Text("Levantamento", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
                         Text(data.field("cliente").ifBlank { data.field("empresa").ifBlank { "Cliente não informado" } }, style = MaterialTheme.typography.bodySmall, color = appMutedColor())
                     }
+                    AccountSettingsButton(onLogout, onChangePassword, themeMode, onThemeModeChange)
                 }
             }
         },
@@ -1419,7 +1468,7 @@ private fun SurveyScreen(
                 Row(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 12.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     if (currentIndex > 0) {
                         OutlinedButton(
-                            onClick = { surveyStep = (surveyStep - 1).coerceAtLeast(0) },
+                            onClick = { goToStep(currentIndex - 1) },
                             modifier = Modifier.height(52.dp),
                             shape = RoundedCornerShape(16.dp)
                         ) {
@@ -1435,7 +1484,7 @@ private fun SurveyScreen(
                     }
                     if (currentIndex < sections.lastIndex) {
                         Button(
-                            onClick = { surveyStep = (surveyStep + 1).coerceAtMost(sections.lastIndex) },
+                            onClick = { goToStep(currentIndex + 1) },
                             modifier = Modifier.weight(1f).height(52.dp),
                             shape = RoundedCornerShape(16.dp),
                             colors = ButtonDefaults.buttonColors(containerColor = Navy, contentColor = Color.White)
@@ -1486,7 +1535,7 @@ private fun SurveyScreen(
                 sections.forEachIndexed { index, section ->
                     val active = index == currentIndex
                     Button(
-                        onClick = { surveyStep = index },
+                        onClick = { goToStep(index) },
                         shape = RoundedCornerShape(16.dp),
                         colors = ButtonDefaults.buttonColors(
                             containerColor = if (active) Navy else Color.White,
@@ -1871,29 +1920,68 @@ private fun DeviceSyncPanel(devices: List<DeviceSyncStatus>) {
         color = appSurfaceColor(),
         border = androidx.compose.foundation.BorderStroke(1.dp, appBorderColor())
     ) {
-        Column(Modifier.padding(16.dp)) {
-            Text("Dispositivos da equipe", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = appTextColor())
-            Text("Situação informada pelos aplicativos Android.", style = MaterialTheme.typography.bodySmall, color = appMutedColor())
-            Spacer(Modifier.height(10.dp))
+        Column(Modifier.padding(12.dp)) {
+            Text("Sincronização dos implantadores", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = appTextColor())
+            Text("Último contato dos aplicativos Android.", style = MaterialTheme.typography.bodySmall, color = appMutedColor())
+            Spacer(Modifier.height(6.dp))
             if (devices.isEmpty()) {
                 Text("Nenhum dispositivo enviou diagnóstico ainda.", style = MaterialTheme.typography.bodySmall, color = appMutedColor())
             } else {
-                devices.forEachIndexed { index, device ->
-                    val failed = !device.lastError.isNullOrBlank()
-                    val color = if (failed) MaterialTheme.colorScheme.error else if (device.pendingCount > 0) Color(0xFFD18A22) else Green
-                    Row(Modifier.fillMaxWidth().padding(vertical = 7.dp), verticalAlignment = Alignment.Top) {
-                        Box(Modifier.size(10.dp).padding(top = 3.dp).clip(CircleShape).background(color))
-                        Spacer(Modifier.width(9.dp))
-                        Column(Modifier.weight(1f)) {
-                            Text(device.username, fontWeight = FontWeight.Bold, color = appTextColor())
-                            Text("App ${device.appVersion} • ${shortDeviceId(device.deviceId)}", style = MaterialTheme.typography.bodySmall, color = appMutedColor())
-                            Text("Visto em ${formatServerSyncTime(device.lastSeen)}", style = MaterialTheme.typography.bodySmall, color = appMutedColor())
-                            device.lastError?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error, maxLines = 2) }
+                BoxWithConstraints(Modifier.fillMaxWidth()) {
+                    val columnCount = if (maxWidth >= 300.dp) 2 else 1
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        devices.chunked(columnCount).forEach { rowDevices ->
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                rowDevices.forEach { device ->
+                                    DeviceSyncCard(device, Modifier.weight(1f))
+                                }
+                                repeat(columnCount - rowDevices.size) {
+                                    Spacer(Modifier.weight(1f))
+                                }
+                            }
                         }
-                        Text("${device.pendingCount} pend.", style = MaterialTheme.typography.labelMedium, color = color)
                     }
-                    if (index < devices.lastIndex) HorizontalDivider(color = appBorderColor())
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DeviceSyncCard(device: DeviceSyncStatus, modifier: Modifier = Modifier) {
+    val failed = !device.lastError.isNullOrBlank()
+    val statusColor = if (failed) MaterialTheme.colorScheme.error else if (device.pendingCount > 0) Color(0xFFD18A22) else Green
+    val status = if (failed) "Falha" else if (device.pendingCount > 0) "Aguardando" else "Sincronizado"
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(14.dp),
+        color = appSurfaceColor(),
+        border = androidx.compose.foundation.BorderStroke(1.dp, appBorderColor())
+    ) {
+        Column(Modifier.padding(horizontal = 9.dp, vertical = 8.dp)) {
+            Row(verticalAlignment = Alignment.Top) {
+                Box(Modifier.padding(top = 4.dp).size(9.dp).clip(CircleShape).background(statusColor))
+                Spacer(Modifier.width(7.dp))
+                Text(
+                    device.fullName.ifBlank { device.username },
+                    modifier = Modifier.weight(1f),
+                    fontWeight = FontWeight.Bold,
+                    color = appTextColor(),
+                    maxLines = 2,
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+            Spacer(Modifier.height(5.dp))
+            Text("Última sincronização", style = MaterialTheme.typography.labelSmall, color = appMutedColor())
+            Text(formatServerSyncTime(device.lastSeen), style = MaterialTheme.typography.labelMedium, color = appTextColor(), fontWeight = FontWeight.SemiBold)
+            device.lastError?.let {
+                Spacer(Modifier.height(3.dp))
+                Text(it, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error, maxLines = 2)
+            }
+            HorizontalDivider(Modifier.padding(vertical = 6.dp), color = appBorderColor())
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                Text(status, style = MaterialTheme.typography.labelSmall, color = statusColor, fontWeight = FontWeight.Bold, maxLines = 1)
+                Text("${device.pendingCount} pend.", style = MaterialTheme.typography.labelSmall, color = appMutedColor(), maxLines = 1)
             }
         }
     }
@@ -1907,8 +1995,6 @@ private fun formatServerSyncTime(value: String): String = runCatching {
     formatSyncTime(Instant.parse(value).toEpochMilli())
 }.getOrDefault(value.take(16).replace('T', ' '))
 
-private fun shortDeviceId(value: String): String = if (value.length <= 12) value else "${value.take(8)}…${value.takeLast(4)}"
-
 @Composable
 private fun DashboardHeader(
     user: AuthUser,
@@ -1917,9 +2003,6 @@ private fun DashboardHeader(
     themeMode: ReiThemeMode,
     onThemeModeChange: (ReiThemeMode) -> Unit
 ) {
-    var showMenu by rememberSaveable { mutableStateOf(false) }
-    var showPasswordDialog by rememberSaveable { mutableStateOf(false) }
-    var showThemeDialog by rememberSaveable { mutableStateOf(false) }
     Surface(
         modifier = Modifier.statusBarsPadding(),
         color = appSurfaceColor(),
@@ -1941,56 +2024,99 @@ private fun DashboardHeader(
                 Text(user.fullName, style = MaterialTheme.typography.labelSmall, color = appMutedColor(), maxLines = 1)
             }
             Spacer(Modifier.width(9.dp))
-            Box {
-                IconButton(
-                    onClick = { showMenu = true },
-                    modifier = Modifier.size(42.dp).clip(CircleShape).background(MaterialTheme.colorScheme.surfaceVariant)
-                ) {
-                    Icon(Icons.Outlined.Settings, contentDescription = "Configurações", tint = MaterialTheme.colorScheme.primary)
-                }
-                DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
-                    DropdownMenuItem(
-                        text = { Text("Tema: ${themeMode.label}") },
-                        leadingIcon = { Icon(Icons.Outlined.Settings, contentDescription = null) },
-                        onClick = {
-                            showMenu = false
-                            showThemeDialog = true
-                        }
-                    )
-                    DropdownMenuItem(
-                        text = { Text("Alterar minha senha") },
-                        leadingIcon = { Icon(Icons.Outlined.Lock, contentDescription = null) },
-                        onClick = {
-                            showMenu = false
-                            showPasswordDialog = true
-                        }
-                    )
-                    DropdownMenuItem(
-                        text = { Text("Sair do sistema") },
-                        leadingIcon = { Icon(Icons.Outlined.Logout, contentDescription = null) },
-                        onClick = {
-                            showMenu = false
-                            onLogout()
-                        }
-                    )
-                }
-            }
+            AccountSettingsButton(onLogout, onChangePassword, themeMode, onThemeModeChange)
         }
     }
-    if (showPasswordDialog) {
-        ChangePasswordDialog(
-            onDismiss = { showPasswordDialog = false },
-            onChangePassword = onChangePassword
+}
+
+@Composable
+private fun AccountSettingsButton(
+    onLogout: () -> Unit,
+    onChangePassword: (String, String) -> Result<Unit>,
+    themeMode: ReiThemeMode,
+    onThemeModeChange: (ReiThemeMode) -> Unit
+) {
+    var showSettings by rememberSaveable { mutableStateOf(false) }
+    IconButton(
+        onClick = { showSettings = true },
+        modifier = Modifier.size(42.dp).clip(CircleShape).background(MaterialTheme.colorScheme.surfaceVariant)
+    ) {
+        Icon(Icons.Outlined.Settings, contentDescription = "Configurações", tint = MaterialTheme.colorScheme.primary)
+    }
+    if (showSettings) {
+        AccountSettingsDialog(
+            themeMode = themeMode,
+            onThemeModeChange = onThemeModeChange,
+            onChangePassword = onChangePassword,
+            onLogout = {
+                showSettings = false
+                onLogout()
+            },
+            onDismiss = { showSettings = false }
         )
     }
-    if (showThemeDialog) {
-        ThemeSettingsDialog(
+}
+
+@Composable
+private fun AccountSettingsDialog(
+    themeMode: ReiThemeMode,
+    onThemeModeChange: (ReiThemeMode) -> Unit,
+    onChangePassword: (String, String) -> Result<Unit>,
+    onLogout: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    var screen by rememberSaveable { mutableStateOf("main") }
+    when (screen) {
+        "theme" -> ThemeSettingsDialog(
             selected = themeMode,
-            onDismiss = { showThemeDialog = false },
+            onDismiss = { screen = "main" },
             onSelect = {
                 onThemeModeChange(it)
-                showThemeDialog = false
+                screen = "main"
             }
+        )
+        "password" -> ChangePasswordDialog(
+            onDismiss = { screen = "main" },
+            onChangePassword = onChangePassword
+        )
+        else -> AlertDialog(
+            onDismissRequest = onDismiss,
+            title = { Text("Configurações da conta", fontWeight = FontWeight.Bold) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    OutlinedButton(
+                        onClick = { screen = "theme" },
+                        modifier = Modifier.fillMaxWidth().height(52.dp),
+                        shape = RoundedCornerShape(15.dp)
+                    ) {
+                        Icon(Icons.Outlined.Settings, contentDescription = null)
+                        Spacer(Modifier.width(8.dp))
+                        Text("Tema: ${themeMode.label}")
+                    }
+                    OutlinedButton(
+                        onClick = { screen = "password" },
+                        modifier = Modifier.fillMaxWidth().height(52.dp),
+                        shape = RoundedCornerShape(15.dp)
+                    ) {
+                        Icon(Icons.Outlined.Lock, contentDescription = null)
+                        Spacer(Modifier.width(8.dp))
+                        Text("Alterar minha senha")
+                    }
+                    HorizontalDivider(color = appBorderColor())
+                    OutlinedButton(
+                        onClick = onLogout,
+                        modifier = Modifier.fillMaxWidth().height(52.dp),
+                        shape = RoundedCornerShape(15.dp),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error)
+                    ) {
+                        Icon(Icons.Outlined.Logout, contentDescription = null)
+                        Spacer(Modifier.width(8.dp))
+                        Text("Sair do sistema")
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = onDismiss) { Text("Fechar") } },
+            shape = RoundedCornerShape(24.dp)
         )
     }
 }
@@ -2539,6 +2665,10 @@ private fun ReportViewerScreen(
     item: ImplementationSummary,
     surveyMode: Boolean,
     onBack: () -> Unit,
+    onLogout: () -> Unit,
+    onChangePassword: (String, String) -> Result<Unit>,
+    themeMode: ReiThemeMode,
+    onThemeModeChange: (ReiThemeMode) -> Unit,
     onEdit: (() -> Unit)?,
     onEvaluate: ((String, String, Set<String>) -> Unit)?,
     onReprint: (() -> Unit)?
@@ -2584,6 +2714,8 @@ private fun ReportViewerScreen(
                     Surface(color = MaterialTheme.colorScheme.secondary.copy(alpha = .16f), shape = RoundedCornerShape(50)) {
                         Text(if (surveyMode) "Concluído" else "Entregue", Modifier.padding(horizontal = 10.dp, vertical = 6.dp), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.secondary)
                     }
+                    Spacer(Modifier.width(5.dp))
+                    AccountSettingsButton(onLogout, onChangePassword, themeMode, onThemeModeChange)
                 }
             }
         },
@@ -2956,8 +3088,14 @@ private fun ViewerAttachment(item: ReportAttachment) {
 }
 
 @Composable
-private fun ReiTopBar(onHome: (() -> Unit)?, onNewReport: () -> Unit, onLogout: () -> Unit) {
-    var showMenu by rememberSaveable { mutableStateOf(false) }
+private fun ReiTopBar(
+    onHome: (() -> Unit)?,
+    onNewReport: () -> Unit,
+    onLogout: () -> Unit,
+    onChangePassword: (String, String) -> Result<Unit>,
+    themeMode: ReiThemeMode,
+    onThemeModeChange: (ReiThemeMode) -> Unit
+) {
     Surface(
         modifier = Modifier.statusBarsPadding(),
         color = appSurfaceColor(),
@@ -2995,24 +3133,7 @@ private fun ReiTopBar(onHome: (() -> Unit)?, onNewReport: () -> Unit, onLogout: 
                 Icon(Icons.Outlined.DeleteOutline, contentDescription = "Novo relatório", tint = Color(0xFF596174))
             }
             Spacer(Modifier.width(7.dp))
-            Box {
-                IconButton(
-                    onClick = { showMenu = true },
-                    modifier = Modifier.size(42.dp).clip(CircleShape).background(MaterialTheme.colorScheme.surfaceVariant)
-                ) {
-                    Icon(Icons.Outlined.Settings, contentDescription = "Configurações", tint = Color(0xFF596174))
-                }
-                DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
-                    DropdownMenuItem(
-                        text = { Text("Sair do sistema") },
-                        leadingIcon = { Icon(Icons.Outlined.Logout, contentDescription = null) },
-                        onClick = {
-                            showMenu = false
-                            onLogout()
-                        }
-                    )
-                }
-            }
+            AccountSettingsButton(onLogout, onChangePassword, themeMode, onThemeModeChange)
         }
     }
 }
@@ -3574,10 +3695,8 @@ private fun PhotoField(
     val required = item?.let { ReportSchema.isRequired(data, it) } == true
     val fulfilled = data.field(key).isNotBlank()
     val context = androidx.compose.ui.platform.LocalContext.current
-    val cameraFile = remember { File(context.cacheDir, "survey_${key}_${System.currentTimeMillis()}.jpg") }
-    val cameraUri = remember(cameraFile) {
-        FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", cameraFile)
-    }
+    val cameraTarget = remember(key) { createSurveyPhotoTarget(context, key) }
+    val cameraUri = cameraTarget.second
     val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { saved ->
         if (saved) vm.setField(key, cameraUri.toString())
     }
@@ -3717,6 +3836,19 @@ private fun FormField(
             )
         )
     }
+}
+
+internal fun createSurveyPhotoTarget(
+    context: Context,
+    key: String,
+    timestamp: Long = System.currentTimeMillis()
+): Pair<File, Uri> {
+    val directory = File(context.filesDir, "report_photos")
+    check(directory.isDirectory || directory.mkdirs()) { "Não foi possível preparar o diretório de fotos." }
+    val safeKey = key.replace(Regex("[^A-Za-z0-9._-]"), "_").trim('_').ifBlank { "campo" }.take(64)
+    val file = File(directory, "survey_${safeKey}_$timestamp.jpg")
+    val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+    return file to uri
 }
 
 @OptIn(ExperimentalMaterial3Api::class)

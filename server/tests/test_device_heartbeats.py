@@ -61,7 +61,9 @@ class DeviceHeartbeatTests(unittest.TestCase):
     def test_supervisor_sees_all_and_implantador_only_own_device(self) -> None:
         saved = rei_server.save_device_heartbeat(self.heartbeat(), self.alice)
         self.assertEqual("alice", saved["username"])
-        self.assertEqual(1, len(rei_server.list_device_heartbeats(self.supervisor)))
+        supervisor_devices = rei_server.list_device_heartbeats(self.supervisor)
+        self.assertEqual(1, len(supervisor_devices))
+        self.assertEqual("Alice Implantadora", supervisor_devices[0]["fullName"])
         self.assertEqual(1, len(rei_server.list_device_heartbeats(self.alice)))
         self.assertEqual([], rei_server.list_device_heartbeats(self.bob))
         self.assertNotIn("token", saved)
@@ -72,6 +74,27 @@ class DeviceHeartbeatTests(unittest.TestCase):
             rei_server.save_device_heartbeat(self.heartbeat(username="bob"), self.alice)
         self.assertEqual(403, context.exception.status)
         self.assertEqual("heartbeat_identity_mismatch", context.exception.code)
+
+    def test_only_latest_device_is_listed_for_each_implantador(self) -> None:
+        device_ids = ["device-android-001", "device-android-002", "device-android-003"]
+        for index, device_id in enumerate(device_ids):
+            payload = self.heartbeat()
+            payload["deviceId"] = device_id
+            payload["pendingCount"] = index
+            rei_server.save_device_heartbeat(payload, self.alice)
+
+        with rei_server.connect() as db:
+            for index, device_id in enumerate(device_ids, start=1):
+                db.execute(
+                    "UPDATE device_heartbeats SET last_seen=? WHERE device_id=?",
+                    (f"2026-07-17T17:3{index}:00+00:00", device_id),
+                )
+
+        devices = rei_server.list_device_heartbeats(self.supervisor)
+        self.assertEqual(1, len(devices))
+        self.assertEqual("device-android-003", devices[0]["deviceId"])
+        self.assertEqual(2, devices[0]["pendingCount"])
+        self.assertEqual("Alice Implantadora", devices[0]["fullName"])
 
     def test_http_endpoints_filter_devices_and_reject_api_key_only(self) -> None:
         alice_token = rei_server.create_session(self.alice["id"])

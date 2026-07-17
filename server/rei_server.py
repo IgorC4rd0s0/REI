@@ -2315,17 +2315,29 @@ def list_device_heartbeats(user: dict) -> list[dict]:
     with connect() as db:
         rows = db.execute(
             f"""
-            SELECT d.username, d.device_id, d.app_version, d.last_seen,
-                   d.pending_count, d.last_error
-            FROM device_heartbeats d
-            {where}
-            ORDER BY d.last_seen DESC, d.username, d.device_id
+            WITH ranked AS (
+                SELECT d.username, COALESCE(u.full_name, d.username) AS full_name,
+                       d.device_id, d.app_version, d.last_seen, d.pending_count, d.last_error,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY d.user_id
+                           ORDER BY d.last_seen DESC, d.client_last_seen DESC, d.device_id DESC
+                       ) AS position
+                FROM device_heartbeats d
+                LEFT JOIN users u ON u.id=d.user_id
+                {where}
+            )
+            SELECT username, full_name, device_id, app_version, last_seen,
+                   pending_count, last_error
+            FROM ranked
+            WHERE position=1
+            ORDER BY last_seen DESC, username
             """,
             params,
         ).fetchall()
     return [
         {
             "username": row["username"],
+            "fullName": row["full_name"],
             "deviceId": row["device_id"],
             "appVersion": row["app_version"],
             "lastSeen": row["last_seen"],
@@ -3606,6 +3618,22 @@ def supervisor_dashboard(query: dict[str, list[str]]) -> dict:
     }
 
 
+def admin_header_html(user: dict) -> str:
+    """Mantém as páginas administrativas com o mesmo cabeçalho do frontend web."""
+    full_name = html.escape(
+        str(user.get("full_name") or user.get("username") or "Usuário")
+    )
+    return f"""<header class="topbar"><a class="brand" href="/web" title="Voltar ao painel" aria-label="Voltar ao painel"><img class="theme-logo-light" src="/web/assets/logo_dubrasil_blue.png" alt="DuBrasil Soluções"><img class="theme-logo-dark" src="/web/assets/logo_dubrasil_white.png" alt="" aria-hidden="true"></a><div class="spacer"></div><span class="header-pill">Supervisor · {full_name}</span><a class="nav" href="/admin"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg><span>Usuários</span></a><a class="nav" href="/admin/items"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2M8 13h8M8 17h5"/></svg><span>Itens dos relatórios</span></a><button class="nav gear" type="button" onclick="openAdminSettings(event); return false;" title="Configurações da conta" aria-label="Configurações da conta"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06a1.7 1.7 0 0 0-1.88-.34A1.7 1.7 0 0 0 14 20.92V21h-4v-.08A1.7 1.7 0 0 0 9 19.37a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.63 15 1.7 1.7 0 0 0 3.08 14H3v-4h.08A1.7 1.7 0 0 0 4.63 9a1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.63 1.7 1.7 0 0 0 10 3.08V3h4v.08A1.7 1.7 0 0 0 15 4.63a1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06-.06A1.7 1.7 0 0 0 19.37 9c.2.61.77 1.02 1.55 1.02H21v4h-.08A1.7 1.7 0 0 0 19.4 15z"/></svg></button></header>"""
+
+
+def standardize_admin_header(page: str, user: dict) -> str:
+    start = page.find("<header>")
+    end = page.find("</header>", start)
+    if start < 0 or end < 0:
+        return page
+    return page[:start] + admin_header_html(user) + page[end + len("</header>") :]
+
+
 def admin_html(user: dict | None, message: str = "", error: str = "") -> str:
     notice = f'<div class="notice">{html.escape(message)}</div>' if message else ""
     alert = f'<div class="error">{html.escape(error)}</div>' if error else ""
@@ -3617,9 +3645,9 @@ def admin_html(user: dict | None, message: str = "", error: str = "") -> str:
     <style>
     :root{--navy:#263a7a;--dark:#172653;--green:#58ad45;--bg:#f4f6fa;--line:#e1e5ee;--muted:#727b90}
     *{box-sizing:border-box}body{margin:0;font-family:Inter,Segoe UI,Arial,sans-serif;background:var(--bg);color:#20283b}
-    header{background:#fff;border-bottom:1px solid var(--line);padding:14px 5%;display:flex;align-items:center;justify-content:space-between;gap:12px}
-    .brand{display:flex;align-items:center;gap:12px}.brand img{width:46px;height:46px;object-fit:contain;display:block}.brand .theme-logo-dark{display:none}.login .brand{justify-content:center;width:100%}.login .brand img{width:128px;height:128px}
-    .spacer{flex:1}nav{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.nav{display:inline-flex;align-items:center;justify-content:center;text-decoration:none;border-radius:11px;padding:10px 14px;font-weight:800;color:var(--navy);background:#eef1f7}.nav.active{background:var(--navy);color:#fff}.nav.gear{width:42px;padding:10px;cursor:pointer;border:0;background:#eef1f7}.nav.gear svg{width:19px;height:19px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+    header.topbar{position:sticky;top:0;z-index:5;min-height:48px;background:#fff;border-bottom:1px solid var(--line);padding:6px clamp(12px,2.4vw,24px);display:grid;grid-template-columns:auto minmax(12px,1fr) auto auto auto auto;align-items:center;gap:10px;box-shadow:0 1px 3px rgba(27,36,55,.05)}
+    .topbar .brand{display:flex;align-items:center;min-width:46px;text-decoration:none}.topbar .brand img{width:46px;height:46px;object-fit:contain;display:block}.topbar .brand .theme-logo-dark{display:none}.login .brand{justify-content:center;width:100%}.login .brand img{width:128px;height:128px}
+    .spacer{flex:1}.header-pill{min-height:32px;display:inline-flex;align-items:center;justify-content:center;border-radius:999px;background:#eef2fb;color:#263a7a;padding:5px 9px;font-size:11px;font-weight:700;white-space:nowrap}.topbar .nav{height:38px;min-height:38px;display:inline-flex;align-items:center;justify-content:center;gap:7px;text-decoration:none;border:1px solid var(--line);border-radius:12px;padding:0 13px;font-size:13px;font-weight:800;white-space:nowrap;color:var(--navy);background:#fff}.topbar .nav svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}.topbar .nav.gear{width:44px;padding:0;cursor:pointer}
     main{max-width:1080px;margin:34px auto;padding:0 20px}.hero{background:linear-gradient(135deg,var(--dark),var(--navy));color:#fff;border-radius:24px;padding:28px;margin-bottom:22px}
     .hero h1{margin:0 0 7px}.hero p{margin:0;color:#d7def7}.grid{display:grid;grid-template-columns:360px 1fr;gap:20px}.card{background:#fff;border:1px solid var(--line);border-radius:20px;padding:22px}
     h2{margin:0 0 17px;font-size:19px}label{display:block;font-size:12px;font-weight:700;color:#596174;margin:12px 0 6px}
@@ -3628,9 +3656,9 @@ def admin_html(user: dict | None, message: str = "", error: str = "") -> str:
     .logout{background:#eef1f7;color:var(--navy)}.modal{position:fixed;inset:0;background:rgba(12,19,40,.48);display:grid;place-items:center;z-index:20;padding:18px}.modal .card{width:min(500px,100%);max-height:88vh;overflow:auto}.admin-modal .card{width:min(400px,100%)}.admin-settings-card .row{display:flex;align-items:center;gap:12px;margin-bottom:16px}.admin-settings-card h2{margin:0 0 4px;font-size:18px}.admin-settings-card .danger{background:#c0392b;color:#fff}table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:12px 10px;border-bottom:1px solid var(--line);font-size:13px}
     th{color:var(--muted);font-size:11px;text-transform:uppercase}.badge{display:inline-block;padding:5px 9px;border-radius:20px;background:#e9f5e6;color:#3b7131;font-size:11px;font-weight:700}
     .badge.implantador{background:#e9edfb;color:var(--navy)}.notice,.error{padding:12px 15px;border-radius:11px;margin-bottom:15px}.notice{background:#e9f5e6;color:#35682d}.error{background:#fdeaea;color:#9a3030}
-    .login{max-width:430px;margin:70px auto}.muted{color:var(--muted);font-size:13px}.user-actions{display:flex;align-items:flex-start;gap:8px;flex-wrap:wrap}.password-reset{position:relative}.password-reset summary{list-style:none;cursor:pointer;border-radius:11px;padding:12px 14px;font-weight:700;color:var(--navy);background:#eef1f7;white-space:nowrap}.password-reset summary::-webkit-details-marker{display:none}.password-reset[open] form{position:absolute;right:0;top:48px;z-index:4;width:260px;padding:14px;background:#fff;border:1px solid var(--line);border-radius:14px;box-shadow:0 16px 35px rgba(23,38,83,.18)}.password-reset form label{margin-top:0}.password-reset form input{margin-bottom:10px}.password-reset form button{width:100%}@media(max-width:800px){.grid{grid-template-columns:1fr}.password-reset[open] form{position:fixed;left:18px;right:18px;top:20%;width:auto}}
+    .login{max-width:430px;margin:70px auto}.muted{color:var(--muted);font-size:13px}.user-actions{display:flex;align-items:flex-start;gap:8px;flex-wrap:wrap}.password-reset{position:relative}.password-reset summary{list-style:none;cursor:pointer;border-radius:11px;padding:12px 14px;font-weight:700;color:var(--navy);background:#eef1f7;white-space:nowrap}.password-reset summary::-webkit-details-marker{display:none}.password-reset[open] form{position:absolute;right:0;top:48px;z-index:4;width:260px;padding:14px;background:#fff;border:1px solid var(--line);border-radius:14px;box-shadow:0 16px 35px rgba(23,38,83,.18)}.password-reset form label{margin-top:0}.password-reset form input{margin-bottom:10px}.password-reset form button{width:100%}@media(max-width:860px){header.topbar{grid-template-columns:auto minmax(8px,1fr) auto}.header-pill{grid-column:1/-1;justify-self:stretch}.grid{grid-template-columns:1fr}.password-reset[open] form{position:fixed;left:18px;right:18px;top:20%;width:auto}}
     html[data-theme="dark"]{--navy:#afc0ff;--dark:#1b2d64;--green:#91da7d;--bg:#080e1b;--line:#46536e;--muted:#d4dbea;color-scheme:dark}html[data-theme="dark"] body{color:#f7f9ff;background:#080e1b}html[data-theme="dark"] header,html[data-theme="dark"] .card,html[data-theme="dark"] .password-reset[open] form{background:#151d2d;border-color:var(--line)}html[data-theme="dark"] header{box-shadow:0 5px 18px rgba(0,0,0,.24)}html[data-theme="dark"] input,html[data-theme="dark"] select{background:#0d1524;border-color:#4d5b77;color:#f7f9ff}html[data-theme="dark"] label,html[data-theme="dark"] .muted{color:#d4dbea}html[data-theme="dark"] .logout,html[data-theme="dark"] .password-reset summary{background:#222d42;color:#f1f4ff}html[data-theme="dark"] th,html[data-theme="dark"] td{border-color:var(--line)}html[data-theme="dark"] .brand .theme-logo-light{display:none}html[data-theme="dark"] .brand .theme-logo-dark{display:block;filter:brightness(1.12) drop-shadow(0 0 1px rgba(255,255,255,.85)) drop-shadow(0 0 6px rgba(143,168,255,.22))}html[data-theme="dark"] header .brand img{width:56px;height:56px}html[data-theme="dark"] .login .brand img{width:136px;height:136px}
-    html[data-theme="dark"] .hero{background:linear-gradient(135deg,#1b2d64,#30478f);border:1px solid #425a9c}html[data-theme="dark"] button,html[data-theme="dark"] .nav.active{background:#405aa8;color:#fff}
+    html[data-theme="dark"] .hero{background:linear-gradient(135deg,#1b2d64,#30478f);border:1px solid #425a9c}html[data-theme="dark"] button{background:#405aa8;color:#fff}html[data-theme="dark"] .topbar .nav{background:#151d2d;border-color:#46536e;color:#f1f4ff}html[data-theme="dark"] .header-pill{background:#293754;border:1px solid #465676;color:#f1f4ff}
     </style><script>!function(){var m=localStorage.getItem("reiTheme")||"system",q=matchMedia("(prefers-color-scheme: dark)"),a=function(){var d=m==="dark"||(m==="system"&&q.matches);document.documentElement.dataset.theme=d?"dark":"light"};a();q.addEventListener&&q.addEventListener("change",a)}();window.openAdminSettings=function(e){e&&(e.preventDefault(),e.stopPropagation());var t=document.createElement("div");t.className="modal admin-modal",t.innerHTML='<section class="card admin-settings-card"><div class="row"><div><h2>Configurações da conta</h2><p class="muted">Sair do sistema.</p></div><div class="spacer"></div><button class="btn secondary" onclick="closeAdminModal()" title="Fechar" aria-label="Fechar">Fechar</button></div><div class="row"><form method="post" action="/admin/logout" style="flex:1"><button class="btn danger" type="submit">Sair do sistema</button></form></div></section>',document.body.appendChild(t),t.addEventListener("click",function(e){e.target===t&&closeAdminModal()})};window.closeAdminModal=function(){var e=document.querySelector(".admin-modal");e&&e.remove()}</script></head><body>"""
     base_end = "</main></body></html>"
     if users_count() == 0:
@@ -3679,7 +3707,7 @@ def admin_html(user: dict | None, message: str = "", error: str = "") -> str:
         f"<button type='submit'>Salvar nova senha</button></form></details></div></td></tr>"
         for row in users
     )
-    return (
+    page = (
         base_start
         + f"""<header><div class="brand"><img class="theme-logo-light" src="/web/assets/logo_dubrasil_blue.png" alt="DuBrasil Soluções"><img class="theme-logo-dark" src="/web/assets/logo_dubrasil_white.png" alt="" aria-hidden="true"></div><div class="spacer"></div><nav><a class="nav" href="/web">Painel</a><a class="nav active" href="/admin">Usuários</a><a class="nav" href="/admin/items">Itens dos relatórios</a><button class="nav gear" type="button" onclick="openAdminSettings(event); return false;" title="Configurações da conta" aria-label="Configurações da conta"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06a1.7 1.7 0 0 0-1.88-.34A1.7 1.7 0 0 0 14 20.92V21h-4v-.08A1.7 1.7 0 0 0 9 19.37a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.63 15 1.7 1.7 0 0 0 3.08 14H3v-4h.08A1.7 1.7 0 0 0 4.63 9a1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.63 1.7 1.7 0 0 0 10 3.08V3h4v.08A1.7 1.7 0 0 0 15 4.63a1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.37 9c.2.61.77 1.02 1.55 1.02H21v4h-.08A1.7 1.7 0 0 0 19.4 15z"/></svg></button></nav></header><main>
     <div class="hero"><h1>Gestão de usuários</h1><p>Cadastre supervisores e implantadores que terão acesso ao aplicativo.</p></div>{notice}{alert}
@@ -3690,6 +3718,7 @@ def admin_html(user: dict | None, message: str = "", error: str = "") -> str:
     <section class="card"><h2>Usuários cadastrados</h2><div style="overflow:auto"><table><thead><tr><th>Usuário</th><th>Perfil</th><th>Status</th><th>Ação</th></tr></thead><tbody>{rows}</tbody></table></div></section></div>"""
         + base_end
     )
+    return standardize_admin_header(page, user)
 
 
 def admin_items_html(user: dict | None, message: str = "", error: str = "") -> str:
@@ -3702,9 +3731,9 @@ def admin_items_html(user: dict | None, message: str = "", error: str = "") -> s
     <style>
     :root{--navy:#263a7a;--dark:#172653;--green:#58ad45;--bg:#f4f6fa;--line:#e1e5ee;--muted:#727b90;--soft:#f8faff}
     *{box-sizing:border-box}body{margin:0;font-family:Inter,Segoe UI,Arial,sans-serif;background:var(--bg);color:#20283b}
-    header{position:sticky;top:0;z-index:5;background:rgba(255,255,255,.96);backdrop-filter:blur(10px);border-bottom:1px solid var(--line);padding:14px 5%;display:flex;align-items:center;justify-content:space-between;gap:12px}
-    .brand{display:flex;align-items:center;gap:12px}.brand img{width:42px;height:42px;object-fit:contain;display:block}
-    .spacer{flex:1}nav{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.nav{display:inline-flex;align-items:center;justify-content:center;text-decoration:none;border-radius:999px;padding:9px 13px;font-weight:800;color:var(--navy);background:#eef1f7;font-size:13px}.nav.active{background:var(--navy);color:#fff}.nav.gear{width:38px;padding:9px;cursor:pointer;border:0}.nav.gear svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+    header.topbar{position:sticky;top:0;z-index:5;min-height:48px;background:#fff;border-bottom:1px solid var(--line);padding:6px clamp(12px,2.4vw,24px);display:grid;grid-template-columns:auto minmax(12px,1fr) auto auto auto auto;align-items:center;gap:10px;box-shadow:0 1px 3px rgba(27,36,55,.05)}
+    .topbar .brand{display:flex;align-items:center;min-width:46px;text-decoration:none}.topbar .brand img{width:46px;height:46px;object-fit:contain;display:block}.topbar .brand .theme-logo-dark{display:none}
+    .spacer{flex:1}.header-pill{min-height:32px;display:inline-flex;align-items:center;justify-content:center;border-radius:999px;background:#eef2fb;color:#263a7a;padding:5px 9px;font-size:11px;font-weight:700;white-space:nowrap}.topbar .nav{height:38px;min-height:38px;display:inline-flex;align-items:center;justify-content:center;gap:7px;text-decoration:none;border:1px solid var(--line);border-radius:12px;padding:0 13px;font-size:13px;font-weight:800;white-space:nowrap;color:var(--navy);background:#fff}.topbar .nav svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}.topbar .nav.gear{width:44px;padding:0;cursor:pointer}
     main{max-width:1220px;margin:22px auto;padding:0 18px 28px}.hero{background:linear-gradient(135deg,var(--dark),var(--navy));color:#fff;border-radius:22px;padding:20px 22px;margin-bottom:16px;display:flex;align-items:flex-end;justify-content:space-between;gap:16px}
     .hero h1{margin:0 0 5px;font-size:28px}.hero p{margin:0;color:#d7def7}.hero small{display:block;color:#bfc9f5;font-weight:800;text-transform:uppercase;letter-spacing:.08em;font-size:11px;margin-bottom:6px}
     .section-title{display:flex;align-items:center;justify-content:space-between;margin:18px 0 10px}.section-title h2{margin:0;font-size:18px}.section-title span{color:var(--muted);font-size:13px}
@@ -3724,8 +3753,8 @@ def admin_items_html(user: dict | None, message: str = "", error: str = "") -> s
     .empty{display:flex;align-items:center;min-height:44px;padding:10px 12px;border:1px dashed #cfd5e2;border-radius:13px;background:#fbfcff;color:var(--muted);font-size:13px}
     .modal{position:fixed;inset:0;background:rgba(12,19,40,.48);display:grid;place-items:center;z-index:20;padding:18px}.modal .card{width:min(500px,100%);max-height:88vh;overflow:auto}.admin-modal .card{width:min(400px,100%)}.admin-settings-card .row{display:flex;align-items:center;gap:12px;margin-bottom:16px}.admin-settings-card h2{margin:0 0 4px;font-size:18px}.admin-settings-card .danger{background:#c0392b;color:#fff}
     @media(max-width:1100px){.forms-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.lists-grid{grid-template-columns:1fr}}
-    @media(max-width:900px){.condition-row{grid-template-columns:1fr 1fr}.condition-row .remove-condition{grid-column:1/-1}}@media(max-width:700px){header{align-items:flex-start;flex-direction:column}.hero{display:block}.item-switch,.forms-grid{grid-template-columns:1fr}.two-col,.condition-row{grid-template-columns:1fr}main{padding:0 12px 24px}.card{padding:14px}}
-    html[data-theme="dark"]{--navy:#9bb0ff;--dark:#101933;--green:#75c361;--bg:#0d1220;--line:#343d51;--muted:#aeb8ce;--soft:#121827;color-scheme:dark}html[data-theme="dark"] body{color:#eef2ff}html[data-theme="dark"] header,html[data-theme="dark"] .card,html[data-theme="dark"] .item-switch button,html[data-theme="dark"] .source-label,html[data-theme="dark"] .field-edit[open] form,html[data-theme="dark"] .admin-settings-card{background:#171d2b;border-color:var(--line);color:#eef2ff}html[data-theme="dark"] input,html[data-theme="dark"] select,html[data-theme="dark"] textarea,html[data-theme="dark"] .empty{background:#111725;border-color:#3b465d;color:#eef2ff}html[data-theme="dark"] .form-card h2,html[data-theme="dark"] .list-card h2,html[data-theme="dark"] .topic strong,html[data-theme="dark"] .area-title{color:#dbe3ff}html[data-theme="dark"] .pill,html[data-theme="dark"] .delete,html[data-theme="dark"] .logout,html[data-theme="dark"] .field-edit summary,html[data-theme="dark"] .cancel-edit,html[data-theme="dark"] .add-condition{background:#222a3b;color:#dbe3ff}html[data-theme="dark"] .required-never{background:#2b3549;color:#d2daed}html[data-theme="dark"] .required-always{background:#4b2528;color:#ffb7b1}html[data-theme="dark"] .required-conditional{background:#49391e;color:#ffd48c}
+    @media(max-width:900px){.condition-row{grid-template-columns:1fr 1fr}.condition-row .remove-condition{grid-column:1/-1}}@media(max-width:860px){header.topbar{grid-template-columns:auto minmax(8px,1fr) auto}.header-pill{grid-column:1/-1;justify-self:stretch}.hero{display:block}.item-switch,.forms-grid{grid-template-columns:1fr}.two-col,.condition-row{grid-template-columns:1fr}main{padding:0 12px 24px}.card{padding:14px}}
+    html[data-theme="dark"]{--navy:#9bb0ff;--dark:#101933;--green:#75c361;--bg:#0d1220;--line:#343d51;--muted:#aeb8ce;--soft:#121827;color-scheme:dark}html[data-theme="dark"] body{color:#eef2ff}html[data-theme="dark"] header,html[data-theme="dark"] .card,html[data-theme="dark"] .item-switch button,html[data-theme="dark"] .source-label,html[data-theme="dark"] .field-edit[open] form,html[data-theme="dark"] .admin-settings-card{background:#171d2b;border-color:var(--line);color:#eef2ff}html[data-theme="dark"] input,html[data-theme="dark"] select,html[data-theme="dark"] textarea,html[data-theme="dark"] .empty{background:#111725;border-color:#3b465d;color:#eef2ff}html[data-theme="dark"] .form-card h2,html[data-theme="dark"] .list-card h2,html[data-theme="dark"] .topic strong,html[data-theme="dark"] .area-title{color:#dbe3ff}html[data-theme="dark"] .pill,html[data-theme="dark"] .delete,html[data-theme="dark"] .logout,html[data-theme="dark"] .field-edit summary,html[data-theme="dark"] .cancel-edit,html[data-theme="dark"] .add-condition{background:#222a3b;color:#dbe3ff}html[data-theme="dark"] .required-never{background:#2b3549;color:#d2daed}html[data-theme="dark"] .required-always{background:#4b2528;color:#ffb7b1}html[data-theme="dark"] .required-conditional{background:#49391e;color:#ffd48c}html[data-theme="dark"] .brand .theme-logo-light{display:none}html[data-theme="dark"] .brand .theme-logo-dark{display:block;filter:brightness(1.12) drop-shadow(0 0 1px rgba(255,255,255,.85)) drop-shadow(0 0 6px rgba(143,168,255,.22))}html[data-theme="dark"] .topbar .nav{background:#171d2b;border-color:#46536e;color:#f1f4ff}html[data-theme="dark"] .header-pill{background:#293754;border:1px solid #465676;color:#f1f4ff}
     </style><script>
     !function(){var m=localStorage.getItem("reiTheme")||"system",q=matchMedia("(prefers-color-scheme: dark)"),a=function(){var d=m==="dark"||(m==="system"&&q.matches);document.documentElement.dataset.theme=d?"dark":"light"};a();q.addEventListener&&q.addEventListener("change",a)}();
     window.openAdminSettings=function(e){e&&(e.preventDefault(),e.stopPropagation());var t=document.createElement("div");t.className="modal admin-modal",t.innerHTML='<section class="card admin-settings-card"><div class="row"><div><h2>Configurações da conta</h2><p class="muted">Sair do sistema.</p></div><div class="spacer"></div><button class="btn secondary" onclick="closeAdminModal()" title="Fechar" aria-label="Fechar">Fechar</button></div><div class="row"><form method="post" action="/admin/logout" style="flex:1"><button class="btn danger" type="submit">Sair do sistema</button></form></div></section>',document.body.appendChild(t),t.addEventListener("click",function(e){e.target===t&&closeAdminModal()})};window.closeAdminModal=function(){var e=document.querySelector(".admin-modal");e&&e.remove()}
@@ -3826,7 +3855,7 @@ def admin_items_html(user: dict | None, message: str = "", error: str = "") -> s
     levantamento_total = sum(
         len(section.get("fields", [])) for section in data["levantamento"]
     )
-    return (
+    page = (
         base_start
         + f"""<header><div class="brand"><img class="theme-logo-light" src="/web/assets/logo_dubrasil_blue.png" alt="DuBrasil Soluções"><img class="theme-logo-dark" src="/web/assets/logo_dubrasil_white.png" alt="" aria-hidden="true"></div><div class="spacer"></div><nav><a class="nav" href="/web">Painel</a><a class="nav" href="/admin">Usuários</a><a class="nav active" href="/admin/items">Itens dos relatórios</a><button class="nav gear" type="button" onclick="openAdminSettings(event); return false;" title="Configurações da conta" aria-label="Configurações da conta"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06a1.7 1.7 0 0 0-1.88-.34A1.7 1.7 0 0 0 14 20.92V21h-4v-.08A1.7 1.7 0 0 0 9 19.37a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.63 15 1.7 1.7 0 0 0 3.08 14H3v-4h.08A1.7 1.7 0 0 0 4.63 9a1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.63 1.7 1.7 0 0 0 10 3.08V3h4v.08A1.7 1.7 0 0 0 15 4.63a1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.37 9c.2.61.77 1.02 1.55 1.02H21v4h-.08A1.7 1.7 0 0 0 19.4 15z"/></svg></button></nav></header><main>
     <div class="hero"><div><small>Configuração dinâmica</small><h1>Gestão de itens e tópicos</h1><p>Cadastre campos do levantamento e itens de preenchimento da implantação.</p></div></div>{notice}{alert}
@@ -3906,6 +3935,7 @@ def admin_items_html(user: dict | None, message: str = "", error: str = "") -> s
     </div>"""
         + base_end
     )
+    return standardize_admin_header(page, user)
 
 
 def admin_query(kind: str, text: str) -> str:

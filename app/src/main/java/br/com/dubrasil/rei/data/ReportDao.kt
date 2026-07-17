@@ -4,6 +4,7 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.room.Transaction
 
 /** Consultas locais. A fila de sincronização é definida exclusivamente por [getPendingSync]. */
 @Dao
@@ -13,6 +14,9 @@ interface ReportDao {
 
     @Query("SELECT * FROM reports WHERE status = 'COMPLETED' ORDER BY completedAt DESC")
     fun getCompleted(): List<ReportEntity>
+
+    @Query("SELECT * FROM reports WHERE status = 'COMPLETED' AND reportId = :reportId LIMIT 1")
+    fun getCompletedByReportId(reportId: String): ReportEntity?
 
     @Query("SELECT * FROM reports WHERE status = 'COMPLETED' AND syncStatus != 'SYNCED' ORDER BY updatedAt ASC")
     fun getPendingSync(): List<ReportEntity>
@@ -31,6 +35,18 @@ interface ReportDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     fun upsertAll(reports: List<ReportEntity>)
+
+    @Transaction
+    fun upsertHistoryAndDraft(history: ReportEntity, draft: ReportEntity) {
+        upsert(history)
+        upsert(draft)
+    }
+
+    @Transaction
+    fun upsertHistoryAndDeleteDraft(history: ReportEntity) {
+        upsert(history)
+        deleteDraft()
+    }
 
     @Query("DELETE FROM reports WHERE status = 'DRAFT'")
     fun deleteDraft()

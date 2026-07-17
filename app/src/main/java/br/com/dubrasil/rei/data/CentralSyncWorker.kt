@@ -3,9 +3,11 @@ package br.com.dubrasil.rei.data
 import android.content.Context
 import androidx.work.BackoffPolicy
 import androidx.work.Constraints
+import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.ExistingWorkPolicy
 import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.Worker
 import androidx.work.WorkerParameters
@@ -96,14 +98,40 @@ class CentralSyncWorker(context: Context, params: WorkerParameters) : Worker(con
 }
 
 object SyncScheduler {
-    private const val UNIQUE_WORK = "rei_central_sync"
+    private const val UNIQUE_IMMEDIATE_WORK = "rei_central_sync"
+    private const val UNIQUE_PERIODIC_WORK = "rei_central_sync_periodic"
+    private const val PERIODIC_INTERVAL_MINUTES = 15L
+
+    private fun wifiConstraint(): Constraints = Constraints.Builder()
+        .setRequiredNetworkType(NetworkType.UNMETERED)
+        .build()
 
     fun enqueue(context: Context) {
         val request = OneTimeWorkRequestBuilder<CentralSyncWorker>()
-            .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.UNMETERED).build())
+            .setConstraints(wifiConstraint())
             .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
             .build()
-        WorkManager.getInstance(context.applicationContext)
-            .enqueueUniqueWork(UNIQUE_WORK, ExistingWorkPolicy.REPLACE, request)
+        val workManager = WorkManager.getInstance(context.applicationContext)
+        workManager.enqueueUniqueWork(UNIQUE_IMMEDIATE_WORK, ExistingWorkPolicy.REPLACE, request)
+        ensurePeriodic(context)
+    }
+
+    /**
+     * Mantém uma verificação persistente registrada no WorkManager. O Android acorda o worker
+     * quando houver rede não medida, mesmo que a interface do aplicativo não esteja aberta.
+     */
+    fun ensurePeriodic(context: Context) {
+        val request = PeriodicWorkRequestBuilder<CentralSyncWorker>(
+            PERIODIC_INTERVAL_MINUTES,
+            TimeUnit.MINUTES
+        )
+            .setConstraints(wifiConstraint())
+            .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
+            .build()
+        WorkManager.getInstance(context.applicationContext).enqueueUniquePeriodicWork(
+            UNIQUE_PERIODIC_WORK,
+            ExistingPeriodicWorkPolicy.KEEP,
+            request
+        )
     }
 }

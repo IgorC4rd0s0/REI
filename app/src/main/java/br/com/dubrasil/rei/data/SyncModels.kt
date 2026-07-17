@@ -17,6 +17,7 @@ data class SyncRunResult(
 
 data class DeviceSyncStatus(
     val username: String,
+    val fullName: String,
     val deviceId: String,
     val appVersion: String,
     val lastSeen: String,

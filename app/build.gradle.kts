@@ -21,6 +21,7 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "1.0.0"
+        testInstrumentationRunner = "br.com.dubrasil.rei.OfflinePersistenceInstrumentation"
         buildConfigField("String", "CENTRAL_API_URL", "\"${localProperties.getProperty("CENTRAL_API_URL", "")}\"")
         buildConfigField("String", "CENTRAL_API_KEY", "\"${localProperties.getProperty("CENTRAL_API_KEY", "")}\"")
     }

@@ -524,7 +524,7 @@ function shell(content) {
     <header class="topbar no-print">
             <div class=\"brand\"><img class=\"theme-logo-light\" src=\"/web/assets/logo_dubrasil_blue.png\" alt=\"DuBrasil Soluções\"><img class=\"theme-logo-dark\" src=\"/web/assets/logo_dubrasil_white.png\" alt=\"\" aria-hidden=\"true\"></div>
       <div class="spacer"></div>
-      ${state.user ? `<span class="pill">${esc(role)} · ${esc(state.user.fullName || state.user.username)}</span>
+      ${state.user ? `<span class="pill">${esc(role)} · ${esc(state.user.fullName || state.user.full_name || state.user.username)}</span>
       ${state.user.role === "supervisor" ? `<a class="btn secondary" href="/admin">${icon("users")}Usuários</a>` : ""}
       ${state.user.role === "supervisor" ? `<a class="btn secondary topbar-btn" href="/admin/items">${icon("clipboard")}Itens dos relatórios</a>` : ""}
       <button class="btn secondary" data-action="settings" title="Configurações da conta" aria-label="Configurações da conta">${icon("settings")}</button>` : ""}
@@ -607,7 +607,18 @@ async function loadUsers() {
   state.users = state.user?.role === "supervisor" ? await api("/api/users?role=implantador") : [];
 }
 async function loadDeviceHeartbeats() {
-  state.deviceHeartbeats = await api("/api/device-heartbeats").catch(() => []);
+  const devices = await api("/api/device-heartbeats").catch(() => []);
+  const latestByUser = new Map();
+  devices.forEach(device => {
+    const key = String(device.username || device.deviceId || "").trim().toLocaleLowerCase("pt-BR");
+    const current = latestByUser.get(key);
+    const lastSeen = Date.parse(device.lastSeen || "") || 0;
+    const currentLastSeen = Date.parse(current?.lastSeen || "") || 0;
+    if (!current || lastSeen > currentLastSeen) latestByUser.set(key, device);
+  });
+  state.deviceHeartbeats = [...latestByUser.values()].sort((a, b) =>
+    (Date.parse(b.lastSeen || "") || 0) - (Date.parse(a.lastSeen || "") || 0)
+  );
 }
 async function loadSupervisorDashboard() {
   if (state.user?.role !== "supervisor") { state.supervisorDashboard = null; return; }
@@ -701,8 +712,8 @@ function renderDashboardArea() {
       ];
   if (!groups.some(group => group.key === state.dashboardFilter)) state.dashboardFilter = groups[0].key;
   const activeGroup = groups.find(group => group.key === state.dashboardFilter) || groups[0];
-  shell(`<section class="hero area-hero">
-      <button class="btn secondary area-back" data-action="dashboard-home">${icon("home")}Voltar</button>
+  shell(`<section class="hero area-hero has-top-action">
+      <button class="btn secondary page-back" data-action="dashboard-home">${icon("home")}Voltar</button>
       <h1>${isSurveyArea ? "Levantamentos" : "Implantação"}</h1>
       <p>${isSurveyArea ? "Dashboard e informações dos levantamentos destinados ao implantador." : "Dashboard, informações das implantações e avaliação das implantações entregues."}</p>
     </section>
@@ -784,26 +795,31 @@ function deviceSyncPanel() {
   if (state.user?.role !== "supervisor") return "";
   const devices = state.deviceHeartbeats || [];
   const rows = devices.map(device => {
+    const registeredUser = state.users.find(user => String(user.username || "").toLocaleLowerCase("pt-BR") === String(device.username || "").toLocaleLowerCase("pt-BR"));
+    const fullName = device.fullName || registeredUser?.full_name || registeredUser?.fullName || device.username || "Usuário";
     const failed = Boolean(device.lastError);
     const status = failed ? "Falha ao sincronizar" : Number(device.pendingCount) > 0 ? "Aguardando sincronização" : "Sincronizado";
     const statusClass = failed ? "failed" : Number(device.pendingCount) > 0 ? "pending" : "synced";
-    const seen = device.lastSeen ? new Date(device.lastSeen).toLocaleString("pt-BR") : "Nunca";
-    const shortId = String(device.deviceId || "").length > 14
-      ? `${String(device.deviceId).slice(0, 8)}…${String(device.deviceId).slice(-4)}`
-      : String(device.deviceId || "-");
+    const seen = device.lastSeen ? new Date(device.lastSeen).toLocaleString("pt-BR", {
+      day: "2-digit",
+      month: "2-digit",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit"
+    }) : "Nunca";
     return `<article class="sync-device ${statusClass}">
       <span class="sync-dot" aria-hidden="true"></span>
       <div class="sync-device-main">
-        <strong>${esc(device.username || "Usuário")}</strong>
-        <small>App ${esc(device.appVersion || "-")} · ${esc(shortId)}</small>
-        <small>Último contato: ${esc(seen)}</small>
+        <strong>${esc(fullName)}</strong>
+        <small>Última sincronização</small>
+        <time>${esc(seen)}</time>
         ${device.lastError ? `<p>${esc(device.lastError)}</p>` : ""}
       </div>
       <div class="sync-device-state"><b>${esc(status)}</b><span>${Number(device.pendingCount) || 0} pendente(s)</span></div>
     </article>`;
   }).join("");
   return `<section class="card sync-panel">
-    <div class="sync-panel-title"><div><h2>Sincronização dos dispositivos</h2><p>Situação enviada pelos aplicativos Android da equipe.</p></div><span>${devices.length} dispositivo(s)</span></div>
+    <div class="sync-panel-title"><div><h2>Sincronização dos implantadores</h2><p>Último contato dos aplicativos Android da equipe.</p></div><span>${devices.length} registro(s)</span></div>
     <div class="sync-device-list">${rows || `<p class="muted">Nenhum dispositivo enviou diagnóstico ainda.</p>`}</div>
   </section>`;
 }
@@ -957,12 +973,13 @@ function renderClientForm(payload = blankClientPayload()) {
   state.editing.reportId = payload.id || payload.reportId || state.editing.reportId;
   const f = state.editing.report.fields;
   const editingExisting = Boolean(payload.id || payload.reportId);
-  shell(`<section class="hero editor-hero">
+  shell(`<section class="hero editor-hero has-top-action">
+      <button class="btn secondary page-back" data-action="dashboard">Voltar</button>
       <span>${editingExisting ? "EDITAR CLIENTE" : "NOVO CLIENTE"}</span>
       <h1>${esc(f.cliente || "Cliente para levantamento")}</h1>
       <p>Cadastro inicial feito pela supervisão antes do levantamento.</p>
     </section>
-    <div class="section-title"><h2>Dados básicos do cliente</h2><div class="spacer"></div><button class="btn secondary" data-action="dashboard">Voltar</button></div>
+    <div class="section-title"><h2>Dados básicos do cliente</h2></div>
     <form id="reportForm" class="card">
       <div class="form-grid">
         ${input("cliente","Cliente / Projeto",f.cliente,true)}
@@ -1008,10 +1025,10 @@ function drawSurvey() {
       : `<button class="btn green" data-action="complete-survey">Concluir levantamento</button>`
   ].filter(Boolean).join("");
   const clientName = f.cliente || f.empresa || "Levantamento de dados";
-  shell(`<div class="section-title survey-title">
+  shell(`<div class="section-title survey-title page-heading">
       <h2>${esc(clientName)}</h2>
       <div class="spacer"></div>
-      <button class="btn secondary" data-action="dashboard">Voltar</button>
+      <button class="btn secondary page-back" data-action="dashboard">Voltar</button>
     </div>
     <nav class="steps survey-steps">${tabs}</nav>
     <section class="card survey-step-card">
@@ -1055,13 +1072,14 @@ function drawEditor() {
     state.step === steps.length - 1 ? `<button class="btn secondary" data-action="save-only">Salvar apenas</button>` : "",
     state.step === steps.length - 1 && canGeneratePdf ? `<button class="btn green" data-action="save-print">Gerar relatório PDF</button>` : ""
   ].filter(Boolean).join("");
-  shell(`<section class="hero editor-hero">
+  shell(`<section class="hero editor-hero has-top-action">
+      <button class="btn secondary page-back" data-action="dashboard">Voltar</button>
       <span>RELATÓRIO EM PREENCHIMENTO</span>
       <h1>${esc(f.cliente || "Novo relatório")}</h1>
       <p>Etapa ${state.step + 1} de ${steps.length} · ${esc(steps[state.step][0])}</p>
       <div class="progress"><i style="width:${((state.step + 1) / steps.length) * 100}%"></i></div>
     </section>
-    <div class="section-title"><h2>${esc(f.cliente || "Novo relatório")}</h2><div class="spacer"></div><button class="btn secondary" data-action="dashboard">Voltar</button></div>
+    <div class="section-title"><h2>${esc(f.cliente || "Novo relatório")}</h2></div>
     <nav class="steps">${steps.map((s,i)=>`<button class="step ${i===state.step?"active":""}" data-action="step" data-step="${i}">${s[0]}</button>`).join("")}</nav>
     <form id="reportForm" class="card">${stepHtml(steps[state.step][1], p)}</form>
     <div class="footer-actions no-print">
@@ -1222,18 +1240,17 @@ function renderViewer(r, options = {}) {
   const evaluationScore = score(r);
   const surveyLike = state.viewingSurveyReadOnly || stage(r) === "levantamento_pendente";
   const actions = [
-    `<button class="btn secondary" data-action="dashboard">Voltar</button>`,
     !state.viewingSurveyReadOnly && state.user.role === "supervisor" && stage(r) === "levantamento_pendente" ? `<button class="btn" data-action="edit-client" data-id="${esc(r.id)}">Editar cadastro</button>` : "",
     !state.viewingSurveyReadOnly && state.user.role !== "supervisor" ? `<button class="btn" data-action="edit" data-id="${esc(r.id)}">Editar</button>` : "",
     !state.viewingSurveyReadOnly && state.user.role === "supervisor" && isReadyForSupervisorEvaluation(r) && !hasEvaluation(r) ? `<button class="btn green" data-action="evaluate" data-id="${esc(r.id)}">Avaliar</button>` : "",
     (state.viewingSurveyReadOnly || (!surveyLike && isReadyForSupervisorEvaluation(r))) ? `<button class="btn" data-action="print">${state.viewingSurveyReadOnly ? "Imprimir relatório" : "Reimprimir PDF"}</button>` : ""
   ].filter(Boolean).join("");
-  shell(`<section class="hero viewer"><h1>${esc(r.client || f.cliente)}</h1><p>${fmtDate(r.completed_at)} · ${esc(r.consultant || f.consultor || "")}</p></section>
+  shell(`<section class="hero viewer has-top-action"><button class="btn secondary page-back" data-action="dashboard">Voltar</button><h1>${esc(r.client || f.cliente)}</h1><p>${fmtDate(r.completed_at)} · ${esc(r.consultant || f.consultor || "")}</p></section>
     <section class="card viewer">${dl([["Cliente / Projeto",f.cliente],["Implantador responsável",assignedName(r)],["Contato",f.contato],["Tel/Cel",f.telefone],["E-mail",f.email],["CNPJ",f.cnpj],["Consultor",f.consultor],["Início",f.inicio],["Término",f.termino],["Status",r.report.deliveryStatus],["Serviços executados",f.servicosExecutados],["Pendências",f.pendencias]])}</section>
     ${hasEvaluation(r)?supervisionEvaluationCard(r, evaluationScore, checks):""}
     ${state.viewingSurveyReadOnly ? surveyViewerHtml(f) : `<section class="card"><h2>Dados preenchidos no R.E.I.</h2>${selected(S.technical,"tecnico",checks,f)}${selected(S.stock,"estoque",checks,f)}${selected(S.finance,"financeiro",checks,f)}${selected(S.fiscal,"fiscal",checks,f)}</section>`}
     ${surveyLike ? printSurveyHtml(r) : printReportHtml(r)}
-    <div class="footer-actions no-print">${actions}</div>`);
+    ${actions ? `<div class="footer-actions no-print">${actions}</div>` : ""}`);
 }
 function surveyViewerHtml(fields) {
   return surveySections.map(([title, sectionFields]) => {
