@@ -5,6 +5,7 @@ import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
 
+/** Executa autenticação e troca de senha contra o servidor configurado no aparelho. */
 class AuthClient(private val context: Context) {
     fun login(
         username: String,

@@ -13,10 +13,15 @@ import br.com.dubrasil.rei.R
 import br.com.dubrasil.rei.model.ChecklistGroup
 import br.com.dubrasil.rei.model.ReportData
 import br.com.dubrasil.rei.model.ReportSchema
+import br.com.dubrasil.rei.model.SchemaItem
 import java.io.OutputStream
 import java.util.Locale
 import kotlin.math.min
 
+/**
+ * Gera os PDFs de implantação e levantamento com o mesmo padrão visual.
+ * O escritor controla paginação, cabeçalhos, anexos e assinaturas sem depender da interface.
+ */
 object PdfExporter {
     private const val PAGE_WIDTH = 595
     private const val PAGE_HEIGHT = 842
@@ -28,6 +33,11 @@ object PdfExporter {
     }
 
     fun write(context: Context, output: OutputStream, data: ReportData) {
+        val phase = if (isSurveyReport(data)) ReportSchema.PHASE_SURVEY else ReportSchema.PHASE_REI
+        val missing = ReportSchema.validateRequiredRequirements(data, phase)
+        require(missing.isEmpty()) {
+            "PDF bloqueado: ${missing.joinToString("; ") { "${it.section}: ${it.label}" }}"
+        }
         val document = PdfDocument()
         val writer = FormWriter(document, context, data)
 
@@ -40,7 +50,9 @@ object PdfExporter {
         }
 
         writer.section("MÓDULOS CONTRATADOS")
-        writer.checklist(ReportSchema.contractedModules, columns = 3) { ReportSchema.contractedKey(it) }
+        writer.checklist(ReportSchema.contractedModules, columns = 3) {
+            ReportSchema.itemKeys("dados", "modulos", it)
+        }
         writer.space(7f)
         writer.infoTable(listOf(
             "Cliente / Projeto" to data.field("cliente"),
@@ -80,7 +92,9 @@ object PdfExporter {
         )
 
         val hasSupervisionEvaluation = data.rating.isNotBlank() ||
-            data.checks.any { it in ReportSchema.supervisionChecklistItems() }
+            ReportSchema.supervision.any { group ->
+                group.items.any { ReportSchema.isChecked(data, "supervisao", group.title, it) }
+            }
         if (hasSupervisionEvaluation) {
             writer.section("AVALIAÇÃO DA SUPERVISÃO")
             writer.infoTable(listOf(
@@ -94,7 +108,7 @@ object PdfExporter {
         val customPhotos = listOf("tecnico", "estoque", "financeiro", "fiscal").flatMap { scope ->
             ReportSchema.dynamicFields(scope).flatMap { group ->
                 group.fields.filter { it.type == "photo" }.mapNotNull { field ->
-                    val value = data.field(ReportSchema.fieldKey(scope, group.title, field.label))
+                    val value = ReportSchema.itemValue(data, scope, group.title, field)
                     if (value.isBlank()) null else "${group.title} • ${field.label}" to value
                 }
             }
@@ -160,6 +174,7 @@ object PdfExporter {
             SurveyPrintField("financeiroDescontoTitulo", "Utiliza Desconto de Título?", "choice"),
             SurveyPrintField("financeiroPrevisaoFutura", "Utiliza Previsão futura de Contas a Pagar?", "choice"),
             SurveyPrintField("financeiroCartaoMaquina", "Qual máquina utilizada?"),
+            SurveyPrintField("financeiroTipoIntegracaoBoleto", "Tipo de integração do boleto", "choice"),
             SurveyPrintField("financeiroFormasPagamento", "Formas de pagamento", "textarea"),
             SurveyPrintField("financeiroParticularidades", "Particularidades perfil financeiro", "textarea")
         )),
@@ -263,7 +278,8 @@ object PdfExporter {
             style = Paint.Style.STROKE
             strokeWidth = 0.8f
         }
-        private val logo = BitmapFactory.decodeResource(context.resources, R.drawable.logo_dubrasil)
+        // O papel é branco; a versão azul transparente mantém contraste na impressão.
+        private val logo = BitmapFactory.decodeResource(context.resources, R.drawable.logo_dubrasil_blue)
         private var pageNumber = 0
         private lateinit var page: PdfDocument.Page
         private var y = 0f
@@ -288,10 +304,10 @@ object PdfExporter {
                 val dynamic = dynamicGroups.firstOrNull { it.title.equals(title, ignoreCase = true) }
                 subsection(title)
                 if (!group?.items.isNullOrEmpty()) {
-                    checklist(group!!.items, columns = 2) { ReportSchema.key(scope, title, it) }
+                    checklist(group!!.items, columns = 2) { ReportSchema.itemKeys(scope, title, it) }
                 }
                 val fields = dynamic?.fields.orEmpty().map { field ->
-                    val value = data.field(ReportSchema.fieldKey(scope, title, field.label))
+                    val value = ReportSchema.itemValue(data, scope, title, field)
                     field.label to if (field.type == "photo" && value.isNotBlank()) "Foto anexada" else value
                 }
                 if (fields.isNotEmpty()) infoTable(fields)
@@ -299,11 +315,11 @@ object PdfExporter {
             }
         }
 
-        fun checklist(items: List<String>, columns: Int, keyFor: (String) -> String) {
+        fun checklist(items: List<SchemaItem>, columns: Int, keyFor: (SchemaItem) -> List<String>) {
             val gap = 0f
             val cellWidth = (contentWidth - gap * (columns - 1)) / columns
             items.chunked(columns).forEachIndexed { rowIndex, row ->
-                val lineSets = row.map { wrap(it, body, cellWidth - 24f) }
+                val lineSets = row.map { wrap(it.label, body, cellWidth - 24f) }
                 val rowHeight = maxOf(22f, (lineSets.maxOfOrNull { it.size } ?: 1) * 11f + 8f)
                 ensure(rowHeight)
                 row.forEachIndexed { column, item ->
@@ -311,7 +327,7 @@ object PdfExporter {
                     val background = if (rowIndex % 2 == 0) Color.WHITE else softGray
                     page.canvas.drawRect(x, y, x + cellWidth, y + rowHeight, Paint().apply { color = background })
                     page.canvas.drawRect(x, y, x + cellWidth, y + rowHeight, linePaint)
-                    drawCheckbox(x + 7f, y + 7f, keyFor(item) in data.checks)
+                    drawCheckbox(x + 7f, y + 7f, keyFor(item).any { it in data.checks })
                     lineSets[column].forEachIndexed { lineIndex, line ->
                         page.canvas.drawText(line, x + 22f, y + 13f + lineIndex * 11f, body)
                     }

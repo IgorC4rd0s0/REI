@@ -25,7 +25,9 @@ class DeviceHeartbeatTests(unittest.TestCase):
         self.previous_database = rei_server.DATABASE
         rei_server.DATABASE = Path(self.temp_dir.name) / "heartbeat_test.db"
         rei_server.initialize_database()
-        self.supervisor = self.create_actor("supervisor", "Supervisora Teste", "supervisor")
+        self.supervisor = self.create_actor(
+            "supervisor", "Supervisora Teste", "supervisor"
+        )
         self.alice = self.create_actor("alice", "Alice Implantadora", "implantador")
         self.bob = self.create_actor("bob", "Bob Implantador", "implantador")
 
@@ -38,7 +40,13 @@ class DeviceHeartbeatTests(unittest.TestCase):
 
     def create_actor(self, username: str, full_name: str, role: str) -> dict:
         user_id = rei_server.create_user(username, full_name, "senha-segura", role)
-        return {"id": user_id, "username": username, "full_name": full_name, "role": role, "active": 1}
+        return {
+            "id": user_id,
+            "username": username,
+            "full_name": full_name,
+            "role": role,
+            "active": 1,
+        }
 
     def heartbeat(self, username: str = "alice") -> dict:
         return {
@@ -77,7 +85,10 @@ class DeviceHeartbeatTests(unittest.TestCase):
             post = urllib.request.Request(
                 base_url,
                 data=json.dumps(self.heartbeat()).encode("utf-8"),
-                headers={"Authorization": f"Bearer {alice_token}", "Content-Type": "application/json"},
+                headers={
+                    "Authorization": f"Bearer {alice_token}",
+                    "Content-Type": "application/json",
+                },
                 method="POST",
             )
             with urllib.request.urlopen(post, timeout=5) as response:
@@ -86,7 +97,10 @@ class DeviceHeartbeatTests(unittest.TestCase):
             self.assertEqual([], self.get_devices(base_url, bob_token))
             self.assertEqual(1, len(self.get_devices(base_url, supervisor_token)))
 
-            api_key_request = urllib.request.Request(base_url, headers={"X-API-Key": str(rei_server.CONFIG.get("api_key", ""))})
+            api_key_request = urllib.request.Request(
+                base_url,
+                headers={"X-API-Key": str(rei_server.CONFIG.get("api_key", ""))},
+            )
             with self.assertRaises(urllib.error.HTTPError) as context:
                 urllib.request.urlopen(api_key_request, timeout=5)
             self.assertEqual(401, context.exception.code)
@@ -97,7 +111,9 @@ class DeviceHeartbeatTests(unittest.TestCase):
 
     @staticmethod
     def get_devices(url: str, token: str) -> list[dict]:
-        request = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+        request = urllib.request.Request(
+            url, headers={"Authorization": f"Bearer {token}"}
+        )
         with urllib.request.urlopen(request, timeout=5) as response:
             return json.loads(response.read().decode("utf-8"))
 

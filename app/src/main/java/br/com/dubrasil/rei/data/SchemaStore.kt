@@ -5,6 +5,7 @@ import br.com.dubrasil.rei.model.ReportSchema
 import br.com.dubrasil.rei.model.SchemaOverrides
 import org.json.JSONObject
 
+/** Persiste e aplica os tópicos personalizados recebidos do servidor. */
 class SchemaStore(context: Context) {
     private val prefs = context.applicationContext.getSharedPreferences("rei_schema", Context.MODE_PRIVATE)
 

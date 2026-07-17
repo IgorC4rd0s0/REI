@@ -15,6 +15,7 @@ data class AuthUser(
 
 data class AuthSession(val token: String, val user: AuthUser)
 
+/** Mantém somente sessão, preferências de conexão e diagnóstico; nunca armazena senha em texto. */
 class AuthStore(context: Context) {
     private val prefs = context.applicationContext.getSharedPreferences("rei_auth", Context.MODE_PRIVATE)
 

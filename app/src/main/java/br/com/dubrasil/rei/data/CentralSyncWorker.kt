@@ -11,6 +11,10 @@ import androidx.work.Worker
 import androidx.work.WorkerParameters
 import java.util.concurrent.TimeUnit
 
+/**
+ * Sincroniza somente registros pendentes quando existe uma rede não medida, normalmente o Wi-Fi
+ * do escritório. Rejeições funcionais permanecem visíveis ao usuário; falhas de rede usam retry.
+ */
 class CentralSyncWorker(context: Context, params: WorkerParameters) : Worker(context, params) {
     override fun doWork(): Result {
         val dao = ReiDatabase.getInstance(applicationContext).reportDao()
@@ -25,6 +29,7 @@ class CentralSyncWorker(context: Context, params: WorkerParameters) : Worker(con
             lastError = error.message ?: "Não foi possível atualizar os itens dos relatórios."
             retryRequired = true
         }
+        // O DAO já filtra a fila; registros sincronizados não são regravados neste percurso.
         dao.getPendingSync().forEach { entity ->
             client.send(entity)
                 .onSuccess { dao.updateSyncStatus(entity.dbId, ReportEntity.SYNC_SYNCED, attempt, null) }

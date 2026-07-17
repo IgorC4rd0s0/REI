@@ -22,6 +22,7 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.concurrent.TimeUnit
 
+/** Criação centralizada de canais e notificações operacionais. */
 object ReiNotifier {
     private const val CHANNEL_ID = "rei_alertas"
 
@@ -84,6 +85,7 @@ class SurveyReminderWorker(context: Context, params: WorkerParameters) : Worker(
     }
 }
 
+/** Agenda lembretes recorrentes sem depender de uma tela aberta. */
 object ReiReminderScheduler {
     private val brDateTime = DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm")
 

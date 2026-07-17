@@ -4,6 +4,7 @@ import androidx.room.Entity
 import androidx.room.Index
 import androidx.room.PrimaryKey
 
+/** Registro Room de um relatório ou rascunho e de sua situação de sincronização. */
 @Entity(
     tableName = "reports",
     indices = [

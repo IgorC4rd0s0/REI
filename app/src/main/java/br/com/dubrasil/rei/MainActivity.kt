@@ -71,6 +71,7 @@ import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Timer
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.CloudDone
+import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -115,6 +116,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.pointer.pointerInput
@@ -134,12 +136,17 @@ import br.com.dubrasil.rei.model.ReportData
 import br.com.dubrasil.rei.model.ReportAttachment
 import br.com.dubrasil.rei.model.ImplementationSummary
 import br.com.dubrasil.rei.model.ReportSchema
+import br.com.dubrasil.rei.model.RequiredRequirement
+import br.com.dubrasil.rei.model.SchemaItem
 import br.com.dubrasil.rei.data.AuthClient
 import br.com.dubrasil.rei.data.AuthStore
 import br.com.dubrasil.rei.data.AuthUser
 import br.com.dubrasil.rei.data.DeviceSyncStatus
 import br.com.dubrasil.rei.data.ReiReminderScheduler
 import br.com.dubrasil.rei.data.SyncDiagnostic
+import br.com.dubrasil.rei.data.SupervisorDashboard
+import br.com.dubrasil.rei.data.SupervisorDashboardFilters
+import br.com.dubrasil.rei.data.DashboardRecordSummary
 import br.com.dubrasil.rei.pdf.PdfExporter
 import br.com.dubrasil.rei.ui.theme.ReiTheme
 import br.com.dubrasil.rei.ui.theme.ReiThemeMode
@@ -209,7 +216,8 @@ private data class SurveyFieldDef(
     val label: String,
     val type: SurveyFieldType = SurveyFieldType.Text,
     val options: List<String> = emptyList(),
-    val minLines: Int = 1
+    val minLines: Int = 1,
+    val definition: SchemaItem? = null
 )
 private data class SurveySectionDef(val title: String, val fields: List<SurveyFieldDef>)
 
@@ -234,6 +242,12 @@ private val baseSurveySections = listOf(
         SurveyFieldDef("financeiroConciliacao", "Utiliza Conciliação bancária?", SurveyFieldType.Choice, yesNoOptions),
         SurveyFieldDef("financeiroCartao", "Utiliza Controle de cartão?", SurveyFieldType.Choice, yesNoOptions),
         SurveyFieldDef("financeiroCartaoMaquina", "Qual máquina utilizada?"),
+        SurveyFieldDef(
+            "financeiroTipoIntegracaoBoleto",
+            "Tipo de integração do boleto",
+            SurveyFieldType.Choice,
+            listOf("Arquivo de remessa e retorno", "API", "Ambos")
+        ),
         SurveyFieldDef("financeiroCheque", "Utiliza Controle de cheque?", SurveyFieldType.Choice, yesNoOptions),
         SurveyFieldDef("financeiroDescontoTitulo", "Utiliza Desconto de Título?", SurveyFieldType.Choice, yesNoOptions),
         SurveyFieldDef("financeiroPrevisaoFutura", "Utiliza Previsão futura de Contas a Pagar?", SurveyFieldType.Choice, yesNoOptions),
@@ -289,7 +303,8 @@ private fun activeSurveySections(): List<SurveySectionDef> {
                 label = field.label,
                 type = type,
                 options = if (type == SurveyFieldType.Choice) field.options.ifEmpty { yesNoOptions } else emptyList(),
-                minLines = if (type == SurveyFieldType.TextArea) field.minLines.coerceAtLeast(3) else 1
+                minLines = if (type == SurveyFieldType.TextArea) field.minLines.coerceAtLeast(3) else 1,
+                definition = field.asSchemaItem()
             )
         }
         if (index >= 0) {
@@ -322,7 +337,14 @@ private val Green = Color(0xFF58AD45)
 @Composable private fun appBorderColor() = MaterialTheme.colorScheme.outlineVariant
 @Composable private fun appTextColor() = MaterialTheme.colorScheme.onSurface
 @Composable private fun appMutedColor() = MaterialTheme.colorScheme.onSurfaceVariant
+@Composable private fun appLogoResource(): Int =
+    if (MaterialTheme.colorScheme.background.luminance() < 0.5f) {
+        R.drawable.logo_dubrasil_white
+    } else {
+        R.drawable.logo_dubrasil_blue
+    }
 
+/** Raiz da navegação Compose e ponto de integração com câmera, arquivos e compartilhamento. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ReiApp(
@@ -353,6 +375,7 @@ private fun ReiApp(
     var showNewClientDialog by rememberSaveable { mutableStateOf(false) }
     var editingClientId by rememberSaveable { mutableStateOf<String?>(null) }
     var pendingCameraUri by rememberSaveable { mutableStateOf<String?>(null) }
+    var editorRequirements by remember { mutableStateOf<List<RequiredRequirement>>(emptyList()) }
 
     if (currentUser == null) {
         LoginScreen(onAuthenticated = { user ->
@@ -596,19 +619,34 @@ private fun ReiApp(
                     }
                 },
                 onExport = {
-                    if (report.field("cliente").isBlank()) {
-                        Toast.makeText(context, "Informe o cliente/projeto antes de exportar", Toast.LENGTH_LONG).show()
-                        currentStep = 0
-                    } else if (!report.isConcludedDelivery()) {
-                        Toast.makeText(context, "Sinalize a implantação como concluída antes de gerar o PDF", Toast.LENGTH_LONG).show()
-                        currentStep = steps.lastIndex
-                    } else {
-                        exportAndSharePdf(reportPdfFileName(report.field("cliente")), report, true)
+                    val missing = ReportSchema.validateRequiredRequirements(report, ReportSchema.PHASE_REI)
+                    if (missing.isNotEmpty()) editorRequirements = missing
+                    else {
+                        val snapshot = ReportSchema.validationSnapshot(report, ReportSchema.PHASE_REI)
+                        vm.setField("_requiredValidationSnapshot", snapshot)
+                        exportAndSharePdf(
+                            reportPdfFileName(report.field("cliente")),
+                            report.copy(fields = report.fields + ("_requiredValidationSnapshot" to snapshot)),
+                            true
+                        )
                     }
                 }
             )
         }
     ) { padding ->
+        if (editorRequirements.isNotEmpty()) {
+            RequiredRequirementsDialog(
+                requirements = editorRequirements,
+                onDismiss = {
+                    currentStep = reiStepForRequirement(editorRequirements.first())
+                    editorRequirements = emptyList()
+                },
+                onGoToFirst = {
+                    currentStep = reiStepForRequirement(editorRequirements.first())
+                    editorRequirements = emptyList()
+                }
+            )
+        }
         Column(
             Modifier.fillMaxSize().padding(padding).imePadding()
                 .verticalScroll(rememberScrollState()).padding(bottom = 24.dp)
@@ -772,7 +810,7 @@ private fun LoginScreen(onAuthenticated: (AuthUser) -> Unit) {
         ) {
             Column(Modifier.padding(25.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                 Image(
-                    painter = painterResource(R.drawable.logo_dubrasil),
+                    painter = painterResource(appLogoResource()),
                     contentDescription = "DuBrasil Soluções",
                     modifier = Modifier.size(128.dp),
                     contentScale = ContentScale.Fit
@@ -872,6 +910,7 @@ private fun LoginScreen(onAuthenticated: (AuthUser) -> Unit) {
 }
 }
 
+/** Dashboard comum aos dois perfis; as permissões alteram ações, não a estrutura visual. */
 @Composable
 private fun DashboardScreen(
     history: List<ImplementationSummary>,
@@ -1002,12 +1041,6 @@ private fun DashboardScreen(
                     }
                 }
                 Spacer(Modifier.height(18.dp))
-                SyncDiagnosticCard(syncDiagnostic, isSyncing, onSyncNow)
-                if (user.isSupervisor) {
-                    Spacer(Modifier.height(14.dp))
-                    DeviceSyncPanel(deviceStatuses)
-                }
-                Spacer(Modifier.height(18.dp))
                 Text("Resumo rápido", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = appTextColor())
                 Spacer(Modifier.height(10.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -1080,26 +1113,29 @@ private fun DashboardScreen(
                 ) {
                     Row(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 12.dp)) {
                         if (dashboardArea == "levantamentos") {
-                        OutlinedButton(
-                            onClick = onNewSurvey,
-                            modifier = Modifier.fillMaxWidth().height(54.dp),
-                            shape = RoundedCornerShape(17.dp)
-                        ) {
-                            Icon(Icons.Outlined.Description, null, Modifier.size(21.dp))
-                            Spacer(Modifier.width(7.dp))
-                            Text("Novo levantamento", fontWeight = FontWeight.Bold)
-                        }
+                            OutlinedButton(
+                                onClick = onNewSurvey,
+                                modifier = Modifier.fillMaxWidth().height(54.dp),
+                                shape = RoundedCornerShape(17.dp)
+                            ) {
+                                Icon(Icons.Outlined.Description, null, Modifier.size(21.dp))
+                                Spacer(Modifier.width(7.dp))
+                                Text("Novo levantamento", fontWeight = FontWeight.Bold)
+                            }
                         } else {
-                        Button(
-                            onClick = onNewReport,
-                            modifier = Modifier.fillMaxWidth().height(54.dp),
-                            shape = RoundedCornerShape(17.dp),
-                            colors = ButtonDefaults.buttonColors(containerColor = Navy, contentColor = Color.White)
-                        ) {
-                            Icon(Icons.Outlined.Add, null, Modifier.size(21.dp))
-                            Spacer(Modifier.width(7.dp))
-                            Text("Nova implantação", fontWeight = FontWeight.Bold)
-                        }
+                            Button(
+                                onClick = onNewReport,
+                                modifier = Modifier.fillMaxWidth().height(54.dp),
+                                shape = RoundedCornerShape(17.dp),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = Navy,
+                                    contentColor = Color.White
+                                )
+                            ) {
+                                Icon(Icons.Outlined.Add, null, Modifier.size(21.dp))
+                                Spacer(Modifier.width(7.dp))
+                                Text("Nova implantação", fontWeight = FontWeight.Bold)
+                            }
                         }
                     }
                 }
@@ -1126,11 +1162,27 @@ private fun DashboardScreen(
                 Modifier.fillMaxWidth().clip(RoundedCornerShape(26.dp))
                     .background(Brush.linearGradient(listOf(NavyDark, Navy))).padding(22.dp)
             ) {
-                Text(if (dashboardArea == "levantamentos") "LEVANTAMENTOS" else "IMPLANTAÇÃO", color = Color(0xFFBFC9F5), style = MaterialTheme.typography.labelMedium)
+                Text(
+                    if (dashboardArea == "levantamentos") "LEVANTAMENTOS" else "IMPLANTAÇÃO",
+                    color = Color(0xFFBFC9F5),
+                    style = MaterialTheme.typography.labelMedium
+                )
                 Spacer(Modifier.height(7.dp))
-                Text(if (dashboardArea == "levantamentos") "Dados dos levantamentos" else "Visão geral das entregas", color = Color.White, style = MaterialTheme.typography.headlineMedium)
+                Text(
+                    if (dashboardArea == "levantamentos") "Dados dos levantamentos" else "Visão geral das entregas",
+                    color = Color.White,
+                    style = MaterialTheme.typography.headlineMedium
+                )
                 Spacer(Modifier.height(7.dp))
-                Text(if (dashboardArea == "levantamentos") "Acompanhe os levantamentos pendentes e a coleta de dados." else "Acompanhe o ritmo, histórico e avaliações dos projetos ERP.", color = Color(0xFFD9DFF6), style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    if (dashboardArea == "levantamentos") {
+                        "Acompanhe os levantamentos pendentes e a coleta de dados."
+                    } else {
+                        "Acompanhe o ritmo, histórico e avaliações dos projetos ERP."
+                    },
+                    color = Color(0xFFD9DFF6),
+                    style = MaterialTheme.typography.bodyMedium
+                )
             }
             Spacer(Modifier.height(18.dp))
             SyncDiagnosticCard(syncDiagnostic, isSyncing, onSyncNow)
@@ -1344,6 +1396,7 @@ private fun SurveyScreen(
     onComplete: () -> Unit
 ) {
     var surveyStep by rememberSaveable(data.field("_id")) { mutableIntStateOf(0) }
+    var missingRequirements by remember { mutableStateOf<List<RequiredRequirement>>(emptyList()) }
     val sections = remember(vm.schemaVersion) { activeSurveySections() }
     val currentIndex = surveyStep.coerceIn(0, sections.lastIndex)
     val currentSection = sections[currentIndex]
@@ -1392,7 +1445,10 @@ private fun SurveyScreen(
                             Icon(Icons.AutoMirrored.Rounded.ArrowForward, null, Modifier.size(20.dp))
                         }
                     } else {
-                        Button(onClick = onComplete, modifier = Modifier.weight(1f).height(52.dp), shape = RoundedCornerShape(16.dp), colors = ButtonDefaults.buttonColors(containerColor = Green)) {
+                        Button(onClick = {
+                            val missing = ReportSchema.validateRequiredRequirements(data, ReportSchema.PHASE_SURVEY)
+                            if (missing.isEmpty()) onComplete() else missingRequirements = missing
+                        }, modifier = Modifier.weight(1f).height(52.dp), shape = RoundedCornerShape(16.dp), colors = ButtonDefaults.buttonColors(containerColor = Green)) {
                             Icon(Icons.Rounded.CheckCircle, null, Modifier.size(20.dp))
                             Spacer(Modifier.width(7.dp))
                             Text("Concluir")
@@ -1402,6 +1458,19 @@ private fun SurveyScreen(
             }
         }
     ) { padding ->
+        if (missingRequirements.isNotEmpty()) {
+            RequiredRequirementsDialog(
+                requirements = missingRequirements,
+                onDismiss = {
+                    surveyStep = surveyStepForRequirement(sections, missingRequirements.first())
+                    missingRequirements = emptyList()
+                },
+                onGoToFirst = {
+                    surveyStep = surveyStepForRequirement(sections, missingRequirements.first())
+                    missingRequirements = emptyList()
+                }
+            )
+        }
         Column(Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState()).padding(horizontal = 18.dp, vertical = 18.dp)) {
             Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(22.dp)).background(Brush.linearGradient(listOf(NavyDark, Navy))).padding(20.dp)) {
                 Text("LEVANTAMENTO DE DADOS", color = Color(0xFFBFC9F5), style = MaterialTheme.typography.labelMedium)
@@ -1441,6 +1510,274 @@ private fun SurveyScreen(
                             SurveyField(field, data, vm)
                         }
                 }
+            }
+        }
+    }
+}
+
+private fun surveyStepForRequirement(
+    sections: List<SurveySectionDef>,
+    requirement: RequiredRequirement
+): Int = sections.indexOfFirst { it.title == requirement.section }.coerceAtLeast(0)
+
+private fun reiStepForRequirement(requirement: RequiredRequirement): Int {
+    val section = requirement.section.lowercase(Locale("pt", "BR"))
+    return when {
+        "técnico" in section -> 1
+        "estoque" in section -> 2
+        "financeiro" in section -> 3
+        "fiscal" in section -> 4
+        "entrega" in section -> 5
+        else -> 0
+    }
+}
+
+private fun requirementDefinition(key: String, explicit: SchemaItem? = null): SchemaItem? =
+    explicit ?: ReportSchema.fixedRequirements.values.flatten().firstOrNull { it.key == key }
+
+@Composable
+private fun RequiredLabel(label: String, required: Boolean, fulfilled: Boolean) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(label, modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium, color = appTextColor())
+        if (required) {
+            Text(" *", color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.Black)
+            Spacer(Modifier.width(5.dp))
+            RequiredBadge(fulfilled)
+        }
+    }
+}
+
+@Composable
+private fun RequiredBadge(fulfilled: Boolean) {
+    Surface(
+        shape = RoundedCornerShape(50),
+        color = if (fulfilled) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.errorContainer
+    ) {
+        Text(
+            if (fulfilled) "Obrigatório · cumprido" else "Obrigatório",
+            modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp),
+            style = MaterialTheme.typography.labelSmall,
+            color = if (fulfilled) MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onErrorContainer,
+            fontWeight = FontWeight.Bold
+        )
+    }
+}
+
+@Composable
+private fun RequiredRequirementsDialog(
+    requirements: List<RequiredRequirement>,
+    onDismiss: () -> Unit,
+    onGoToFirst: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = { Icon(Icons.Rounded.ErrorOutline, contentDescription = null, tint = MaterialTheme.colorScheme.error) },
+        title = { Text("Itens obrigatórios pendentes") },
+        text = {
+            Column(Modifier.fillMaxWidth().heightIn(max = 520.dp).verticalScroll(rememberScrollState())) {
+                Text("Corrija todos os requisitos abaixo antes de finalizar.", color = appMutedColor())
+                Spacer(Modifier.height(12.dp))
+                requirements.groupBy { it.section }.forEach { (section, items) ->
+                    Text(section, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                    Spacer(Modifier.height(5.dp))
+                    items.forEach { item ->
+                        Surface(
+                            modifier = Modifier.fillMaxWidth().padding(bottom = 7.dp),
+                            shape = RoundedCornerShape(13.dp),
+                            color = MaterialTheme.colorScheme.errorContainer.copy(alpha = .28f),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = .35f))
+                        ) {
+                            Column(Modifier.padding(11.dp)) {
+                                Text(item.label, fontWeight = FontWeight.Bold, color = appTextColor())
+                                Text(item.reason, style = MaterialTheme.typography.bodySmall, color = appMutedColor())
+                                Text(item.requiredBecause, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error)
+                            }
+                        }
+                    }
+                    Spacer(Modifier.height(5.dp))
+                }
+            }
+        },
+        confirmButton = { Button(onClick = onGoToFirst) { Text("Ir para o primeiro item") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Fechar") } },
+        shape = RoundedCornerShape(24.dp)
+    )
+}
+
+@Composable
+private fun SupervisorManagementDashboard(
+    dashboard: SupervisorDashboard,
+    filters: SupervisorDashboardFilters,
+    loading: Boolean,
+    onFiltersChange: (SupervisorDashboardFilters) -> Unit,
+    onOpenRecord: (String) -> Unit
+) {
+    val indicators = dashboard.indicators
+    Column {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("Visão gerencial", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = appTextColor())
+                Text("Gargalos, carga, avaliações e sincronização", style = MaterialTheme.typography.bodySmall, color = appMutedColor())
+            }
+            if (loading) Text("Atualizando...", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+        }
+        Spacer(Modifier.height(10.dp))
+        Surface(
+            Modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp), color = appSurfaceColor(),
+            border = androidx.compose.foundation.BorderStroke(1.dp, appBorderColor())
+        ) {
+            Column(Modifier.padding(12.dp)) {
+                Text("Filtros", fontWeight = FontWeight.Bold, color = appTextColor())
+                Spacer(Modifier.height(8.dp))
+                Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                    val people = listOf("" to "Todos") + dashboard.implantadores.map { it.value to it.label }
+                    ManagerFilterButton("Implantador: ${people.firstOrNull { it.first == filters.implantador }?.second ?: "Todos"}") {
+                        val index = people.indexOfFirst { it.first == filters.implantador }.coerceAtLeast(0)
+                        onFiltersChange(filters.copy(implantador = people[(index + 1) % people.size].first))
+                    }
+                    val periods = listOf("30" to "30 dias", "90" to "90 dias", "365" to "12 meses", "all" to "Tudo")
+                    ManagerFilterButton("Período: ${periods.first { it.first == filters.period }.second}") {
+                        val index = periods.indexOfFirst { it.first == filters.period }
+                        onFiltersChange(filters.copy(period = periods[(index + 1) % periods.size].first))
+                    }
+                    val stages = listOf("" to "Todas") + dashboard.stages.map { it.value to it.label }
+                    ManagerFilterButton("Etapa: ${stages.firstOrNull { it.first == filters.stage }?.second ?: "Todas"}") {
+                        val index = stages.indexOfFirst { it.first == filters.stage }.coerceAtLeast(0)
+                        onFiltersChange(filters.copy(stage = stages[(index + 1) % stages.size].first))
+                    }
+                    val staleOptions = listOf("3", "7", "15", "30")
+                    ManagerFilterButton("Parados: ${filters.staleDays} dias") {
+                        val index = staleOptions.indexOf(filters.staleDays).coerceAtLeast(0)
+                        onFiltersChange(filters.copy(staleDays = staleOptions[(index + 1) % staleOptions.size]))
+                    }
+                    ManagerFilterButton(if (filters.overdue) "Atrasados: sim" else "Atrasados: todos", filters.overdue) {
+                        onFiltersChange(filters.copy(overdue = !filters.overdue))
+                    }
+                    ManagerFilterButton(if (filters.blockers) "Impedimentos: sim" else "Impedimentos: todos", filters.blockers) {
+                        onFiltersChange(filters.copy(blockers = !filters.blockers))
+                    }
+                }
+            }
+        }
+        Spacer(Modifier.height(10.dp))
+        val metrics = listOf(
+            "Registros" to indicators.total.toString(), "Atrasados" to indicators.overdue.toString(),
+            "Parados" to indicators.stale.toString(), "Avaliar" to indicators.pendingEvaluations.toString(),
+            "Impedimentos" to indicators.blockers.toString(), "Concluídos no mês" to indicators.concludedMonth.toString(),
+            "Média de duração" to (indicators.averageDurationDays?.let { "$it dias" } ?: "-"),
+            "Nota média" to (indicators.averageScore?.let { "$it/10" } ?: "-"),
+            "Erros de sync" to indicators.syncErrors.toString()
+        )
+        metrics.chunked(2).forEach { row ->
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                row.forEach { metric -> ManagerKpi(metric.first, metric.second, Modifier.weight(1f)) }
+                if (row.size == 1) Spacer(Modifier.weight(1f))
+            }
+            Spacer(Modifier.height(8.dp))
+        }
+        ManagerSectionCard("Total por etapa") {
+            dashboard.byStage.forEach { (label, count) -> SyncDiagnosticLine(label, count.toString()) }
+        }
+        Spacer(Modifier.height(10.dp))
+        ManagerSectionCard("Carga por implantador") {
+            if (dashboard.workload.isEmpty()) Text("Nenhum implantador encontrado.", color = appMutedColor())
+            dashboard.workload.forEachIndexed { index, person ->
+                Column(Modifier.padding(vertical = 7.dp)) {
+                    Text(person.fullName, fontWeight = FontWeight.Bold, color = appTextColor())
+                    Text(
+                        "Ativos ${person.active} • Atrasados ${person.overdue} • Parados ${person.stale} • Imped. ${person.blockers}",
+                        style = MaterialTheme.typography.bodySmall, color = appMutedColor()
+                    )
+                    Text(
+                        "Avaliar ${person.pendingEvaluations} • Concluídos no mês ${person.concludedMonth}",
+                        style = MaterialTheme.typography.bodySmall, color = appMutedColor()
+                    )
+                    Text(
+                        "Último sync: ${person.lastSync?.let(::formatServerSyncTime) ?: "Nunca"} • ${person.pendingSync} pend. • ${person.syncErrors} erro(s)",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (person.syncErrors > 0) MaterialTheme.colorScheme.error else appMutedColor()
+                    )
+                }
+                if (index < dashboard.workload.lastIndex) HorizontalDivider(color = appBorderColor())
+            }
+        }
+        Spacer(Modifier.height(10.dp))
+        ManagerRecordList("Atrasados", dashboard.overdue, onOpenRecord)
+        Spacer(Modifier.height(8.dp))
+        ManagerRecordList("Registros parados", dashboard.stale, onOpenRecord)
+        Spacer(Modifier.height(8.dp))
+        ManagerRecordList("Avaliações pendentes", dashboard.pendingEvaluations, onOpenRecord)
+        Spacer(Modifier.height(8.dp))
+        ManagerRecordList("Impedimentos abertos", dashboard.blockers, onOpenRecord)
+        Spacer(Modifier.height(8.dp))
+        ManagerSectionCard("Falhas de sincronização") {
+            if (dashboard.syncErrors.isEmpty()) Text("Nenhuma falha.", color = appMutedColor())
+            dashboard.syncErrors.forEachIndexed { index, error ->
+                Column(Modifier.padding(vertical = 7.dp)) {
+                    Text(error.fullName, fontWeight = FontWeight.Bold, color = appTextColor())
+                    Text("App ${error.appVersion} • ${error.pendingCount} pendente(s)", style = MaterialTheme.typography.bodySmall, color = appMutedColor())
+                    Text(error.error, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error, maxLines = 2)
+                }
+                if (index < dashboard.syncErrors.lastIndex) HorizontalDivider(color = appBorderColor())
+            }
+        }
+    }
+}
+
+@Composable
+private fun ManagerFilterButton(label: String, selected: Boolean = false, onClick: () -> Unit) {
+    OutlinedButton(
+        onClick = onClick,
+        shape = RoundedCornerShape(50),
+        colors = ButtonDefaults.outlinedButtonColors(
+            containerColor = if (selected) MaterialTheme.colorScheme.primaryContainer else Color.Transparent
+        )
+    ) { Text(label, maxLines = 1) }
+}
+
+@Composable
+private fun ManagerKpi(label: String, value: String, modifier: Modifier = Modifier) {
+    Surface(modifier, shape = RoundedCornerShape(15.dp), color = appSurfaceColor(), border = androidx.compose.foundation.BorderStroke(1.dp, appBorderColor())) {
+        Column(Modifier.padding(12.dp)) {
+            Text(label, style = MaterialTheme.typography.labelSmall, color = appMutedColor(), maxLines = 2)
+            Text(value, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = appTextColor())
+        }
+    }
+}
+
+@Composable
+private fun ManagerSectionCard(title: String, content: @Composable () -> Unit) {
+    Surface(Modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp), color = appSurfaceColor(), border = androidx.compose.foundation.BorderStroke(1.dp, appBorderColor())) {
+        Column(Modifier.padding(14.dp)) {
+            Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, color = appTextColor())
+            Spacer(Modifier.height(7.dp))
+            content()
+        }
+    }
+}
+
+@Composable
+private fun ManagerRecordList(title: String, items: List<DashboardRecordSummary>, onOpenRecord: (String) -> Unit) {
+    var expanded by rememberSaveable(title, items.size) { mutableStateOf(false) }
+    val visibleItems = if (expanded) items else items.take(5)
+    ManagerSectionCard("$title (${items.size})") {
+        if (items.isEmpty()) Text("Nenhum registro.", color = appMutedColor())
+        visibleItems.forEachIndexed { index, item ->
+            Column(
+                Modifier.fillMaxWidth().clickable { onOpenRecord(item.id) }.padding(vertical = 8.dp)
+            ) {
+                Text(item.client, fontWeight = FontWeight.Bold, color = appTextColor())
+                Text("${item.assignedName} • ${item.stageLabel}", style = MaterialTheme.typography.bodySmall, color = appMutedColor())
+                val timing = item.deadline?.let { "Prazo: ${formatServerSyncTime(it)}" }
+                    ?: item.daysStale?.let { "Sem atualização há $it dia(s)" }
+                timing?.let { Text(it, style = MaterialTheme.typography.labelSmall, color = appMutedColor()) }
+                item.blocker?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error, maxLines = 2) }
+            }
+            if (index < visibleItems.lastIndex) HorizontalDivider(color = appBorderColor())
+        }
+        if (items.size > 5) {
+            TextButton(onClick = { expanded = !expanded }) {
+                Text(if (expanded) "Mostrar menos" else "Ver todos (${items.size})")
             }
         }
     }
@@ -1593,9 +1930,9 @@ private fun DashboardHeader(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Image(
-                painter = painterResource(R.drawable.logo_dubrasil),
+                painter = painterResource(appLogoResource()),
                 contentDescription = "DuBrasil Soluções",
-                modifier = Modifier.size(46.dp),
+                modifier = Modifier.size(52.dp),
                 contentScale = ContentScale.Fit
             )
             Spacer(Modifier.weight(1f))
@@ -2013,7 +2350,9 @@ private fun StatusDistributionChart(history: List<ImplementationSummary>, title:
 private fun hasSupervisorEvaluation(data: ReportData): Boolean =
     data.rating.isNotBlank() ||
         data.field("_supervisionScore").isNotBlank() ||
-        data.checks.any { it in ReportSchema.supervisionChecklistItems() }
+        ReportSchema.supervision.any { group ->
+            group.items.any { ReportSchema.isChecked(data, "supervisao", group.title, it) }
+        }
 
 private fun ImplementationSummary.isReadyForSupervisorEvaluation(): Boolean =
     deliveryStatus.trim().startsWith("Conclu", ignoreCase = true)
@@ -2059,7 +2398,9 @@ private fun supervisionScore(data: ReportData): Double? {
 
     val total = ReportSchema.supervisionChecklistItems().size
     if (total == 0) return null
-    val done = data.checks.count { it in ReportSchema.supervisionChecklistItems() }
+    val done = ReportSchema.supervision.sumOf { group ->
+        group.items.count { ReportSchema.isChecked(data, "supervisao", group.title, it) }
+    }
     return if (done > 0) done * 10.0 / total else null
 }
 
@@ -2204,6 +2545,7 @@ private fun ReportViewerScreen(
 ) {
     val data = item.report
     var showEvaluation by remember { mutableStateOf(false) }
+    var missingRequirements by remember { mutableStateOf<List<RequiredRequirement>>(emptyList()) }
     if (showEvaluation && onEvaluate != null) {
         SupervisorEvaluationDialog(
             data = data,
@@ -2212,6 +2554,13 @@ private fun ReportViewerScreen(
                 onEvaluate(score, rating, checks)
                 showEvaluation = false
             }
+        )
+    }
+    if (missingRequirements.isNotEmpty()) {
+        RequiredRequirementsDialog(
+            requirements = missingRequirements,
+            onDismiss = { missingRequirements = emptyList(); onEdit?.invoke() },
+            onGoToFirst = { missingRequirements = emptyList(); onEdit?.invoke() }
         )
     }
     Scaffold(
@@ -2278,7 +2627,11 @@ private fun ReportViewerScreen(
                     }
                     if (onReprint != null) {
                         Button(
-                            onClick = onReprint,
+                            onClick = {
+                                val phase = if (surveyMode) ReportSchema.PHASE_SURVEY else ReportSchema.PHASE_REI
+                                val missing = ReportSchema.validateRequiredRequirements(data, phase)
+                                if (missing.isEmpty()) onReprint() else missingRequirements = missing
+                            },
                             modifier = Modifier.weight(1.45f).height(54.dp),
                             shape = RoundedCornerShape(17.dp),
                             colors = ButtonDefaults.buttonColors(containerColor = Navy, contentColor = Color.White)
@@ -2324,7 +2677,12 @@ private fun ReportViewerScreen(
                 ViewerValue("Dias contratados", data.field("diasContratados"))
                 ViewerValue("Dias utilizados", data.field("diasUtilizados"), divider = false)
             }
-            ViewerSelectedChecks("Módulos contratados", ReportSchema.contractedModules.filter { ReportSchema.contractedKey(it) in data.checks })
+            ViewerSelectedChecks(
+                "Módulos contratados",
+                ReportSchema.contractedModules
+                    .filter { ReportSchema.isChecked(data, "dados", "modulos", it) }
+                    .map { it.label }
+            )
             ViewerChecklistScope("Preenchimento técnico", "tecnico", ReportSchema.technical, data)
             ViewerDynamicFields("Campos técnicos personalizados", "tecnico", data)
             ViewerChecklistScope("Módulo Estoque", "estoque", ReportSchema.stock, data)
@@ -2339,7 +2697,9 @@ private fun ReportViewerScreen(
                 ViewerValue("Pendências", data.field("pendencias"), divider = false)
             }
             val supervisionItems = ReportSchema.supervision.flatMap { group ->
-                group.items.filter { ReportSchema.key("supervisao", group.title, it) in data.checks }
+                group.items
+                    .filter { ReportSchema.isChecked(data, "supervisao", group.title, it) }
+                    .map { it.label }
             }
             if (data.rating.isNotBlank() || supervisionItems.isNotEmpty()) {
                 ViewerSection("Avaliação da supervisão") {
@@ -2385,12 +2745,30 @@ private fun SupervisorEvaluationDialog(
     onDismiss: () -> Unit,
     onSave: (String, String, Set<String>) -> Unit
 ) {
-    val supervisionKeys = remember { ReportSchema.supervisionChecklistItems().toSet() }
+    val supervisionKeys = remember {
+        ReportSchema.supervision.flatMap { group ->
+            group.items.flatMap { ReportSchema.itemKeys("supervisao", group.title, it) }
+        }.toSet()
+    }
     var score by remember(data.field("_supervisionScore")) {
         mutableStateOf(data.field("_supervisionScore").replace(",", ".").toFloatOrNull()?.coerceIn(0f, 10f) ?: 0f)
     }
     var rating by remember(data.rating) { mutableStateOf(data.rating) }
     var selected by remember(data.checks) { mutableStateOf(data.checks.filter { it in supervisionKeys }.toSet()) }
+    var missingRequirements by remember { mutableStateOf<List<RequiredRequirement>>(emptyList()) }
+    val evaluationData = data.copy(
+        fields = data.fields + ("_supervisionScore" to String.format(Locale.US, "%.1f", score)),
+        checks = (data.checks - supervisionKeys) + selected,
+        rating = rating
+    )
+
+    if (missingRequirements.isNotEmpty()) {
+        RequiredRequirementsDialog(
+            requirements = missingRequirements,
+            onDismiss = { missingRequirements = emptyList() },
+            onGoToFirst = { missingRequirements = emptyList() }
+        )
+    }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -2452,11 +2830,14 @@ private fun SupervisorEvaluationDialog(
                     Spacer(Modifier.height(5.dp))
                     group.items.forEach { item ->
                         val key = ReportSchema.key("supervisao", group.title, item)
-                        val checked = key in selected
+                        val aliases = ReportSchema.itemKeys("supervisao", group.title, item)
+                        val checked = aliases.any { it in selected }
+                        val required = ReportSchema.isRequired(evaluationData, item)
                         Row(
                             Modifier.fillMaxWidth().clip(RoundedCornerShape(13.dp))
+                                .background(if (required && !checked) MaterialTheme.colorScheme.errorContainer.copy(alpha = .32f) else Color.Transparent)
                                 .clickable {
-                                    selected = if (checked) selected - key else selected + key
+                                    selected = if (checked) selected - aliases.toSet() else selected + key
                                 }
                                 .padding(horizontal = 3.dp, vertical = 5.dp),
                             verticalAlignment = Alignment.CenterVertically
@@ -2464,11 +2845,16 @@ private fun SupervisorEvaluationDialog(
                             Checkbox(
                                 checked = checked,
                                 onCheckedChange = { isChecked ->
-                                    selected = if (isChecked) selected + key else selected - key
+                                    selected = if (isChecked) selected + key else selected - aliases.toSet()
                                 },
                                 colors = CheckboxDefaults.colors(checkedColor = Green, uncheckedColor = Color(0xFF8A91A2))
                             )
-                            Text(item, style = MaterialTheme.typography.bodyMedium, color = appTextColor())
+                            Column(Modifier.weight(1f)) {
+                                RequiredLabel(item.label, required, checked)
+                                if (required && item.requiredMode == "conditional") {
+                                    Text(ReportSchema.conditionSummary(item.requiredWhen), style = MaterialTheme.typography.labelSmall, color = appMutedColor())
+                                }
+                            }
                         }
                     }
                     Spacer(Modifier.height(10.dp))
@@ -2476,7 +2862,11 @@ private fun SupervisorEvaluationDialog(
             }
         },
         confirmButton = {
-            Button(onClick = { onSave(String.format(Locale.US, "%.1f", score), rating, selected) }, colors = ButtonDefaults.buttonColors(containerColor = Green)) {
+            Button(onClick = {
+                val missing = ReportSchema.validateRequiredRequirements(evaluationData, ReportSchema.PHASE_SUPERVISION)
+                if (missing.isEmpty()) onSave(String.format(Locale.US, "%.1f", score), rating, selected)
+                else missingRequirements = missing
+            }, colors = ButtonDefaults.buttonColors(containerColor = Green)) {
                 Text("Salvar avaliação")
             }
         },
@@ -2512,7 +2902,11 @@ private fun ViewerValue(label: String, value: String, divider: Boolean = true) {
 
 @Composable
 private fun ViewerChecklistScope(title: String, scope: String, groups: List<ChecklistGroup>, data: ReportData) {
-    val selected = groups.flatMap { group -> group.items.filter { ReportSchema.key(scope, group.title, it) in data.checks } }
+    val selected = groups.flatMap { group ->
+        group.items
+            .filter { ReportSchema.isChecked(data, scope, group.title, it) }
+            .map { it.label }
+    }
     ViewerSelectedChecks(title, selected)
 }
 
@@ -2574,9 +2968,9 @@ private fun ReiTopBar(onHome: (() -> Unit)?, onNewReport: () -> Unit, onLogout: 
             verticalAlignment = Alignment.CenterVertically
         ) {
             Image(
-                painter = painterResource(R.drawable.logo_dubrasil),
+                painter = painterResource(appLogoResource()),
                 contentDescription = "DuBrasil Soluções",
-                modifier = Modifier.size(46.dp),
+                modifier = Modifier.size(52.dp),
                 contentScale = ContentScale.Fit
             )
             Spacer(Modifier.weight(1f))
@@ -2778,7 +3172,7 @@ private fun IdentificationStep(data: ReportData, vm: ReportViewModel) {
         }
     }
     SectionCard("Módulos contratados", "Selecione tudo que faz parte deste projeto") {
-        CheckItems(ReportSchema.contractedModules, data, vm) { ReportSchema.contractedKey(it) }
+        CheckItems(ReportSchema.contractedModules, data, vm, "dados", "modulos")
     }
     InfoCard("Suporte Técnico", "suportetga@dubrasilsolucoes.com.br", "(34) 3322-8500")
 }
@@ -2806,6 +3200,13 @@ private fun DeliveryStep(
         FormField("Pendências pós-implantação", "pendencias", data, vm, minLines = 4)
     }
     SectionCard("Posicionamento da entrega", "Escolha a situação final da implantação") {
+        val statusRequirement = requirementDefinition("deliveryStatus")
+        val statusRequired = statusRequirement?.let { ReportSchema.isRequired(data, it) } == true
+        if (statusRequired) {
+            Row(Modifier.padding(horizontal = 14.dp, vertical = 5.dp)) {
+                RequiredLabel("Situação da entrega", true, data.deliveryStatus.startsWith("Conclu", ignoreCase = true))
+            }
+        }
         RadioOptions(listOf("Concluído", "Concluído, mas deseja novos serviços", "Não concluído"), data.deliveryStatus, vm::setDeliveryStatus)
     }
     FormCard("Assinaturas digitais") {
@@ -2813,6 +3214,7 @@ private fun DeliveryStep(
             title = "Analista de implantação – DuBrasil",
             key = "assinaturaAnalistaImagem",
             value = data.field("assinaturaAnalistaImagem"),
+            data = data,
             onSaved = vm::setField
         )
         Spacer(Modifier.height(12.dp))
@@ -2820,6 +3222,7 @@ private fun DeliveryStep(
             title = "Responsável pelo cliente",
             key = "assinaturaClienteImagem",
             value = data.field("assinaturaClienteImagem"),
+            data = data,
             onSaved = vm::setField
         )
     }
@@ -2969,19 +3372,19 @@ private fun ChecklistStep(scope: String, groups: List<ChecklistGroup>, data: Rep
         val dynamic = dynamicGroups.firstOrNull { it.title.equals(title, ignoreCase = true) }
         val checklistItems = group?.items.orEmpty()
         val fields = dynamic?.fields.orEmpty()
-        val done = checklistItems.count { ReportSchema.key(scope, title, it) in data.checks }
+        val done = checklistItems.count { ReportSchema.isChecked(data, scope, title, it) }
         val subtitle = buildList {
             if (checklistItems.isNotEmpty()) add("$done de ${checklistItems.size} concluídos")
             if (fields.isNotEmpty()) add("${fields.size} campo(s) personalizado(s)")
         }.joinToString(" • ")
         SectionCard(title, subtitle) {
             if (checklistItems.isNotEmpty()) {
-                CheckItems(checklistItems, data, vm) { ReportSchema.key(scope, title, it) }
+                CheckItems(checklistItems, data, vm, scope, title)
             }
             fields.forEach { field ->
                 SurveyField(
                     SurveyFieldDef(
-                        key = ReportSchema.fieldKey(scope, title, field.label),
+                        key = ReportSchema.fieldKey(scope, title, field),
                         label = field.label,
                         type = when (field.type) {
                             "choice" -> SurveyFieldType.Choice
@@ -2991,7 +3394,8 @@ private fun ChecklistStep(scope: String, groups: List<ChecklistGroup>, data: Rep
                             else -> SurveyFieldType.Text
                         },
                         options = field.options.ifEmpty { if (field.type == "choice") yesNoOptions else emptyList() },
-                        minLines = if (field.type == "textarea") 3 else 1
+                        minLines = if (field.type == "textarea") 3 else 1,
+                        definition = field
                     ),
                     data,
                     vm
@@ -3028,7 +3432,7 @@ private fun SurveyCompletedViewer(data: ReportData) {
 private fun ViewerDynamicFields(title: String, scope: String, data: ReportData) {
     val values = ReportSchema.dynamicFields(scope).flatMap { group ->
         group.fields.mapNotNull { field ->
-            val value = data.field(ReportSchema.fieldKey(scope, group.title, field.label))
+            val value = ReportSchema.itemValue(data, scope, group.title, field)
             if (value.isBlank()) null else Triple(group.title, field, value)
         }
     }
@@ -3081,14 +3485,29 @@ private fun SectionCard(title: String, subtitle: String, content: @Composable ()
 }
 
 @Composable
-private fun CheckItems(items: List<String>, data: ReportData, vm: ReportViewModel, keyFor: (String) -> String) {
+private fun CheckItems(
+    items: List<SchemaItem>,
+    data: ReportData,
+    vm: ReportViewModel,
+    scope: String,
+    group: String
+) {
     items.forEach { item ->
-        val checked = keyFor(item) in data.checks
+        val key = ReportSchema.key(scope, group, item)
+        val aliases = ReportSchema.itemKeys(scope, group, item)
+        val checked = aliases.any { it in data.checks }
+        val required = ReportSchema.isRequired(data, item)
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 9.dp, vertical = 2.dp)
                 .clip(RoundedCornerShape(13.dp))
-                .background(if (checked) MaterialTheme.colorScheme.secondary.copy(alpha = .16f) else Color.Transparent)
-                .clickable { vm.toggle(keyFor(item)) }
+                .background(
+                    when {
+                        required && !checked -> MaterialTheme.colorScheme.errorContainer.copy(alpha = .32f)
+                        checked -> MaterialTheme.colorScheme.secondary.copy(alpha = .16f)
+                        else -> Color.Transparent
+                    }
+                )
+                .clickable { vm.toggle(key, aliases) }
                 .padding(horizontal = 5.dp, vertical = 5.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
@@ -3097,12 +3516,16 @@ private fun CheckItems(items: List<String>, data: ReportData, vm: ReportViewMode
                 onCheckedChange = null,
                 colors = CheckboxDefaults.colors(checkedColor = Green, uncheckedColor = Color(0xFF8A91A2))
             )
-            Text(
-                item,
-                Modifier.weight(1f).padding(end = 8.dp),
-                style = MaterialTheme.typography.bodyMedium,
-                color = if (checked) MaterialTheme.colorScheme.secondary else appTextColor()
-            )
+            Column(Modifier.weight(1f).padding(end = 8.dp)) {
+                RequiredLabel(item.label, required, checked)
+                if (required && item.requiredMode == "conditional") {
+                    Text(
+                        ReportSchema.conditionSummary(item.requiredWhen),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = appMutedColor()
+                    )
+                }
+            }
         }
     }
 }
@@ -3127,20 +3550,29 @@ private fun RadioOptions(options: List<String>, selected: String, onSelect: (Str
 @Composable
 private fun SurveyField(field: SurveyFieldDef, data: ReportData, vm: ReportViewModel) {
     if (field.key == "_surveyScheduledAt") {
-        DateTimeField(field.label, field.key, data, vm)
+        DateTimeField(field.label, field.key, data, vm, field.definition)
         return
     }
     when (field.type) {
         SurveyFieldType.Choice -> ChoiceField(field, data, vm)
-        SurveyFieldType.TextArea -> FormField(field.label, field.key, data, vm, minLines = field.minLines)
-        SurveyFieldType.DateTime -> DateTimeField(field.label, field.key, data, vm)
-        SurveyFieldType.Photo -> PhotoField(field.label, field.key, data, vm)
-        SurveyFieldType.Text -> FormField(field.label, field.key, data, vm)
+        SurveyFieldType.TextArea -> FormField(field.label, field.key, data, vm, minLines = field.minLines, definition = field.definition)
+        SurveyFieldType.DateTime -> DateTimeField(field.label, field.key, data, vm, field.definition)
+        SurveyFieldType.Photo -> PhotoField(field.label, field.key, data, vm, field.definition)
+        SurveyFieldType.Text -> FormField(field.label, field.key, data, vm, definition = field.definition)
     }
 }
 
 @Composable
-private fun PhotoField(label: String, key: String, data: ReportData, vm: ReportViewModel) {
+private fun PhotoField(
+    label: String,
+    key: String,
+    data: ReportData,
+    vm: ReportViewModel,
+    definition: SchemaItem? = null
+) {
+    val item = requirementDefinition(key, definition)
+    val required = item?.let { ReportSchema.isRequired(data, it) } == true
+    val fulfilled = data.field(key).isNotBlank()
     val context = androidx.compose.ui.platform.LocalContext.current
     val cameraFile = remember { File(context.cacheDir, "survey_${key}_${System.currentTimeMillis()}.jpg") }
     val cameraUri = remember(cameraFile) {
@@ -3159,13 +3591,20 @@ private fun PhotoField(label: String, key: String, data: ReportData, vm: ReportV
     }
 
     Column(Modifier.fillMaxWidth().padding(bottom = 12.dp)) {
-        Text(label, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, color = appMutedColor())
+        if (required) RequiredLabel(label, true, fulfilled)
+        else Text(label, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, color = appMutedColor())
+        if (required && item?.requiredMode == "conditional") {
+            Text(ReportSchema.conditionSummary(item.requiredWhen), style = MaterialTheme.typography.labelSmall, color = appMutedColor())
+        }
         Spacer(Modifier.height(7.dp))
         Surface(
             modifier = Modifier.fillMaxWidth().clickable { },
             shape = RoundedCornerShape(16.dp),
             color = appSurfaceColor(),
-            border = androidx.compose.foundation.BorderStroke(1.dp, appBorderColor())
+            border = androidx.compose.foundation.BorderStroke(
+                1.dp,
+                if (required && !fulfilled) MaterialTheme.colorScheme.error else appBorderColor()
+            )
         ) {
             Column(Modifier.padding(12.dp)) {
                 if (data.field(key).isNotBlank()) {
@@ -3207,8 +3646,15 @@ private fun PhotoField(label: String, key: String, data: ReportData, vm: ReportV
 
 @Composable
 private fun ChoiceField(field: SurveyFieldDef, data: ReportData, vm: ReportViewModel) {
+    val item = requirementDefinition(field.key, field.definition)
+    val required = item?.let { ReportSchema.isRequired(data, it) } == true
+    val fulfilled = item?.let { ReportSchema.isFulfilled(data, it) } ?: data.field(field.key).isNotBlank()
     Column(Modifier.fillMaxWidth().padding(bottom = 12.dp)) {
-        Text(field.label, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, color = appMutedColor())
+        if (required) RequiredLabel(field.label, true, fulfilled)
+        else Text(field.label, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, color = appMutedColor())
+        if (required && item?.requiredMode == "conditional") {
+            Text(ReportSchema.conditionSummary(item.requiredWhen), style = MaterialTheme.typography.labelSmall, color = appMutedColor())
+        }
         Spacer(Modifier.height(7.dp))
         Row(
             Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
@@ -3233,48 +3679,83 @@ private fun ChoiceField(field: SurveyFieldDef, data: ReportData, vm: ReportViewM
 }
 
 @Composable
-private fun FormField(label: String, key: String, data: ReportData, vm: ReportViewModel, minLines: Int = 1) {
-    OutlinedTextField(
-        value = data.field(key),
-        onValueChange = { vm.setField(key, it) },
-        label = { Text(label) },
-        minLines = minLines,
-        modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp),
-        shape = RoundedCornerShape(15.dp),
-        colors = OutlinedTextFieldDefaults.colors(
-            focusedBorderColor = MaterialTheme.colorScheme.primary,
-            unfocusedBorderColor = appBorderColor(),
-            focusedContainerColor = appSurfaceColor(),
-            unfocusedContainerColor = appSurfaceColor(),
-            focusedTextColor = appTextColor(),
-            unfocusedTextColor = appTextColor(),
-            focusedLabelColor = MaterialTheme.colorScheme.primary,
-            unfocusedLabelColor = appMutedColor()
+private fun FormField(
+    label: String,
+    key: String,
+    data: ReportData,
+    vm: ReportViewModel,
+    minLines: Int = 1,
+    definition: SchemaItem? = null
+) {
+    val item = requirementDefinition(key, definition)
+    val required = item?.let { ReportSchema.isRequired(data, it) } == true
+    val fulfilled = item?.let { ReportSchema.isFulfilled(data, it) } ?: data.field(key).isNotBlank()
+    Column(Modifier.fillMaxWidth().padding(bottom = 12.dp)) {
+        if (required) {
+            RequiredLabel(label.removeSuffix(" *"), true, fulfilled)
+            if (item?.requiredMode == "conditional") {
+                Text(ReportSchema.conditionSummary(item.requiredWhen), style = MaterialTheme.typography.labelSmall, color = appMutedColor())
+            }
+            Spacer(Modifier.height(5.dp))
+        }
+        OutlinedTextField(
+            value = data.field(key),
+            onValueChange = { vm.setField(key, it) },
+            label = { Text(label.removeSuffix(" *")) },
+            minLines = minLines,
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(15.dp),
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedBorderColor = if (required && !fulfilled) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
+                unfocusedBorderColor = if (required && !fulfilled) MaterialTheme.colorScheme.error else appBorderColor(),
+                focusedContainerColor = appSurfaceColor(),
+                unfocusedContainerColor = appSurfaceColor(),
+                focusedTextColor = appTextColor(),
+                unfocusedTextColor = appTextColor(),
+                focusedLabelColor = MaterialTheme.colorScheme.primary,
+                unfocusedLabelColor = appMutedColor()
+            )
         )
-    )
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun DateTimeField(label: String, key: String, data: ReportData, vm: ReportViewModel) {
+private fun DateTimeField(
+    label: String,
+    key: String,
+    data: ReportData,
+    vm: ReportViewModel,
+    definition: SchemaItem? = null
+) {
     val context = androidx.compose.ui.platform.LocalContext.current
     var showCalendar by rememberSaveable { mutableStateOf(false) }
     val dateState = androidx.compose.material3.rememberDatePickerState()
+    val item = requirementDefinition(key, definition)
+    val required = item?.let { ReportSchema.isRequired(data, it) } == true
+    val fulfilled = data.field(key).isNotBlank()
 
     Surface(
         modifier = Modifier.fillMaxWidth().height(64.dp).padding(bottom = 12.dp).clickable { showCalendar = true },
         shape = RoundedCornerShape(15.dp),
         color = appSurfaceColor(),
-        border = androidx.compose.foundation.BorderStroke(1.dp, appBorderColor())
+        border = androidx.compose.foundation.BorderStroke(
+            1.dp,
+            if (required && !fulfilled) MaterialTheme.colorScheme.error else appBorderColor()
+        )
     ) {
         Row(Modifier.padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 if (data.field(key).isNotBlank()) {
-                    Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+                    Text(if (required) "$label *" else label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
                     Text(data.field(key), style = MaterialTheme.typography.bodyMedium, color = appTextColor())
                 } else {
-                    Text(label, style = MaterialTheme.typography.bodyMedium, color = appMutedColor())
+                    Text(if (required) "$label *" else label, style = MaterialTheme.typography.bodyMedium, color = if (required) MaterialTheme.colorScheme.error else appMutedColor())
                 }
+            }
+            if (required) {
+                Text("Obrigatório", style = MaterialTheme.typography.labelSmall, color = if (fulfilled) Green else MaterialTheme.colorScheme.error)
+                Spacer(Modifier.width(6.dp))
             }
             Icon(Icons.Outlined.CalendarMonth, contentDescription = "Abrir calendário", tint = MaterialTheme.colorScheme.primary)
         }
@@ -3313,17 +3794,40 @@ private fun SignatureField(
     title: String,
     key: String,
     value: String,
+    data: ReportData,
     onSaved: (String, String) -> Unit
 ) {
     var showPad by rememberSaveable { mutableStateOf(false) }
+    val item = requirementDefinition(key)
+    val required = item?.let { ReportSchema.isRequired(data, it) } == true
+    val fulfilled = value.isNotBlank()
     Column {
-        Text(title, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold, color = appTextColor())
+        if (required) {
+            Row(verticalAlignment = Alignment.Top) {
+                Text(
+                    title,
+                    modifier = Modifier.weight(1f),
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = appTextColor()
+                )
+                Spacer(Modifier.width(4.dp))
+                Text("*", color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.Black)
+            }
+            Spacer(Modifier.height(5.dp))
+            RequiredBadge(fulfilled)
+        } else {
+            Text(title, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold, color = appTextColor())
+        }
         Spacer(Modifier.height(8.dp))
         Surface(
             modifier = Modifier.fillMaxWidth().height(132.dp).clickable { showPad = true },
             shape = RoundedCornerShape(16.dp),
             color = appSurfaceColor(),
-            border = androidx.compose.foundation.BorderStroke(1.dp, appBorderColor())
+            border = androidx.compose.foundation.BorderStroke(
+                1.dp,
+                if (required && !fulfilled) MaterialTheme.colorScheme.error else appBorderColor()
+            )
         ) {
             if (value.isNotBlank()) {
                 Box {

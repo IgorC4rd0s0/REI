@@ -6,6 +6,7 @@ import java.util.Base64
 import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.PBEKeySpec
 
+/** Cache de credenciais derivadas usado exclusivamente para o login offline já autorizado. */
 class LocalAuthRepository(context: Context) {
     private val dao = ReiDatabase.getInstance(context.applicationContext).authDao()
 

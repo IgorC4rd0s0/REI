@@ -14,6 +14,9 @@ import br.com.dubrasil.rei.data.ReiReminderScheduler
 import br.com.dubrasil.rei.data.SchemaStore
 import br.com.dubrasil.rei.data.DeviceSyncStatus
 import br.com.dubrasil.rei.data.SyncDiagnostic
+import br.com.dubrasil.rei.data.SupervisorDashboard
+import br.com.dubrasil.rei.data.SupervisorDashboardFilters
+import br.com.dubrasil.rei.data.AuthStore
 import br.com.dubrasil.rei.model.ReportData
 import br.com.dubrasil.rei.model.ReportAttachment
 import br.com.dubrasil.rei.model.ImplementationSummary
@@ -23,6 +26,13 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.UUID
 
+/**
+ * Estado central das telas Android.
+ *
+ * Mantém o formulário atual, o histórico local e os diagnósticos de sincronização. As operações
+ * de persistência ficam no [ReportRepository] para que as telas Compose não acessem o Room ou a
+ * rede diretamente.
+ */
 class ReportViewModel(application: Application) : AndroidViewModel(application) {
     private val repository = ReportRepository(application)
     var report by mutableStateOf(repository.load())
@@ -39,6 +49,12 @@ class ReportViewModel(application: Application) : AndroidViewModel(application) 
         private set
     var isSyncing by mutableStateOf(false)
         private set
+    var supervisorDashboard by mutableStateOf<SupervisorDashboard?>(null)
+        private set
+    var supervisorFilters by mutableStateOf(SupervisorDashboardFilters())
+        private set
+    var isDashboardLoading by mutableStateOf(false)
+        private set
 
     init {
         SchemaStore(application).applyCached()
@@ -46,8 +62,9 @@ class ReportViewModel(application: Application) : AndroidViewModel(application) 
 
     fun setField(key: String, value: String) = update(report.copy(fields = report.fields + (key to value)))
 
-    fun toggle(item: String) {
-        val updated = if (item in report.checks) report.checks - item else report.checks + item
+    fun toggle(item: String, aliases: Collection<String> = listOf(item)) {
+        val checked = aliases.any { it in report.checks }
+        val updated = if (checked) report.checks - aliases.toSet() else report.checks + item
         update(report.copy(checks = updated))
     }
 
@@ -167,6 +184,8 @@ class ReportViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun completeSurvey() {
+        val snapshot = ReportSchema.validationSnapshot(report, ReportSchema.PHASE_SURVEY)
+        report = report.copy(fields = report.fields + ("_requiredValidationSnapshot" to snapshot))
         saveCurrentStage("rei_pendente")
         report = ReportData()
         repository.clear()
@@ -207,7 +226,9 @@ class ReportViewModel(application: Application) : AndroidViewModel(application) 
 
     fun saveSupervisorEvaluation(id: String, supervisorName: String, score: String, rating: String, supervisionChecks: Set<String>) {
         val item = history.firstOrNull { it.id == id } ?: return
-        val supervisionKeys = ReportSchema.supervisionChecklistItems().toSet()
+        val supervisionKeys = ReportSchema.supervision.flatMap { group ->
+            group.items.flatMap { ReportSchema.itemKeys("supervisao", group.title, it) }
+        }.toSet()
         val updatedReport = item.report.copy(
             fields = item.report.fields + buildMap {
                 put("_id", id)
@@ -296,12 +317,34 @@ class ReportViewModel(application: Application) : AndroidViewModel(application) 
             capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)
     }
 
+    fun updateSupervisorFilters(filters: SupervisorDashboardFilters) {
+        supervisorFilters = filters
+        isDashboardLoading = true
+        viewModelScope.launch {
+            val loaded = withContext(Dispatchers.IO) {
+                repository.loadSupervisorDashboard(filters)
+            }
+            if (supervisorFilters == filters) {
+                supervisorDashboard = loaded ?: supervisorDashboard
+                isDashboardLoading = false
+            }
+        }
+    }
+
     fun consumeServerMessage() {
         serverMessage = null
     }
 
     private fun deliveryChecklistCount(data: ReportData) =
-        data.checks.count { it in ReportSchema.allChecklistItems() }
+        listOf(
+            "dados" to listOf(br.com.dubrasil.rei.model.ChecklistGroup("modulos", ReportSchema.contractedModules)),
+            "tecnico" to ReportSchema.technical,
+            "estoque" to ReportSchema.stock,
+            "financeiro" to ReportSchema.finance,
+            "fiscal" to ReportSchema.fiscalReports
+        ).sumOf { (scope, groups) ->
+            groups.sumOf { group -> group.items.count { ReportSchema.isChecked(data, scope, group.title, it) } }
+        }
 
     private fun update(value: ReportData) {
         report = value

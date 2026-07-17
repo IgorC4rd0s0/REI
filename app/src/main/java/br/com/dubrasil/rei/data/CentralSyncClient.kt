@@ -11,10 +11,23 @@ import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
+import java.net.URLEncoder
 import java.util.Base64
 
-class ServerReportException(val statusCode: Int, message: String) : IllegalStateException(message)
+/** Erro de regra ou permissão devolvido pela API, que não deve ser tratado como falha de rede. */
+class ServerReportException(
+    val statusCode: Int,
+    val code: String,
+    val requirements: List<String>,
+    message: String
+) : IllegalStateException(message)
 
+/**
+ * Cliente HTTP usado pelo worker e pelo dashboard.
+ *
+ * O token nunca é incluído nos objetos persistidos do relatório. Imagens locais são convertidas
+ * somente na cópia enviada ao servidor, preservando os URIs usados pelo aparelho.
+ */
 class CentralSyncClient(private val context: Context) {
     private val auth = AuthStore(context)
 
@@ -42,9 +55,7 @@ class CentralSyncClient(private val context: Context) {
             val responseCode = connection.responseCode
             if (responseCode !in 200..299) {
                 val body = connection.errorStream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
-                val message = runCatching { JSONObject(body).optString("error") }.getOrDefault("")
-                    .ifBlank { "Servidor respondeu HTTP $responseCode" }
-                throw ServerReportException(responseCode, message)
+                throw serverException(responseCode, body)
             }
         } finally {
             connection.disconnect()
@@ -78,10 +89,16 @@ class CentralSyncClient(private val context: Context) {
         return copy
     }
 
-    private fun photoFieldKeys(): List<String> =
-        ReportSchema.surveySections.flatMap { section ->
+    private fun photoFieldKeys(): List<String> = buildList {
+        addAll(ReportSchema.surveySections.flatMap { section ->
             section.fields.filter { it.type.equals("photo", ignoreCase = true) }.map { it.key }
-        }.distinct()
+        })
+        listOf("tecnico", "estoque", "financeiro", "fiscal", "supervisao").forEach { scope ->
+            addAll(ReportSchema.dynamicFields(scope).flatMap { group ->
+                group.fields.filter { it.type.equals("photo", ignoreCase = true) }.map { it.key }
+            })
+        }
+    }.distinct()
 
     private fun printableImageDataUrl(value: String, fallbackMimeType: String): String? {
         if (value.startsWith("data:image")) return value
@@ -115,7 +132,7 @@ class CentralSyncClient(private val context: Context) {
         }
     }
 
-    fun fetchCompletedReports(limit: Int = 500): Result<List<ReportEntity>> = runCatching {
+    fun fetchCompletedReports(limit: Int = 1000): Result<List<ReportEntity>> = runCatching {
         val baseUrl = AuthStore.normalizeServerUrl(auth.serverUrl())
         require(baseUrl.isNotBlank()) { "Servidor central não configurado" }
         require(auth.token().isNotBlank()) { "Usuário não autenticado" }
@@ -227,6 +244,90 @@ class CentralSyncClient(private val context: Context) {
         }
     }
 
+    fun fetchSupervisorDashboard(filters: SupervisorDashboardFilters): Result<SupervisorDashboard> = runCatching {
+        val baseUrl = AuthStore.normalizeServerUrl(auth.serverUrl())
+        require(baseUrl.isNotBlank()) { "Servidor central não configurado" }
+        require(auth.token().isNotBlank()) { "Usuário não autenticado" }
+        val values = linkedMapOf(
+            "period" to filters.period,
+            "staleDays" to filters.staleDays,
+            "implantador" to filters.implantador,
+            "stage" to filters.stage,
+            "overdue" to if (filters.overdue) "1" else "0",
+            "blockers" to if (filters.blockers) "1" else "0"
+        )
+        val query = values.entries.joinToString("&") { (key, value) ->
+            "${URLEncoder.encode(key, "UTF-8") }=${URLEncoder.encode(value, "UTF-8") }"
+        }
+        val (status, body) = authenticatedJsonConnection("$baseUrl/api/dashboard/supervisor?$query", "GET")
+        if (status !in 200..299) throw serverException(status, body)
+        parseSupervisorDashboard(JSONObject(body))
+    }
+
+    private fun parseSupervisorDashboard(root: JSONObject): SupervisorDashboard {
+        val indicators = root.optJSONObject("indicators") ?: JSONObject()
+        val lists = root.optJSONObject("lists") ?: JSONObject()
+        val filterOptions = root.optJSONObject("filterOptions") ?: JSONObject()
+        fun records(name: String): List<DashboardRecordSummary> {
+            val array = lists.optJSONArray(name) ?: JSONArray()
+            return (0 until array.length()).map { index ->
+                val item = array.getJSONObject(index)
+                DashboardRecordSummary(
+                    id = item.optString("id"), client = item.optString("client"),
+                    stageLabel = item.optString("stageLabel"), assignedName = item.optString("assignedName"),
+                    deadline = item.optString("deadline").takeIf { it.isNotBlank() },
+                    daysStale = item.optInt("daysStale"), blocker = item.optString("blocker").takeIf { it.isNotBlank() }
+                )
+            }
+        }
+        fun options(name: String, valueKey: String, labelKey: String): List<DashboardFilterOption> {
+            val array = filterOptions.optJSONArray(name) ?: JSONArray()
+            return (0 until array.length()).map { index ->
+                val item = array.getJSONObject(index)
+                DashboardFilterOption(item.optString(valueKey), item.optString(labelKey))
+            }
+        }
+        val workloadArray = root.optJSONArray("workload") ?: JSONArray()
+        val syncArray = lists.optJSONArray("syncErrors") ?: JSONArray()
+        val stagesArray = root.optJSONArray("byStage") ?: JSONArray()
+        return SupervisorDashboard(
+            generatedAt = root.optString("generatedAt"),
+            indicators = DashboardIndicators(
+                total = indicators.optInt("total"), overdue = indicators.optInt("overdue"),
+                stale = indicators.optInt("stale"), pendingEvaluations = indicators.optInt("pendingEvaluations"),
+                blockers = indicators.optInt("blockers"), concludedMonth = indicators.optInt("concludedMonth"),
+                averageDurationDays = indicators.optDouble("averageDurationDays").takeUnless { indicators.isNull("averageDurationDays") },
+                averageScore = indicators.optDouble("averageScore").takeUnless { indicators.isNull("averageScore") },
+                syncErrors = indicators.optInt("syncErrors")
+            ),
+            byStage = (0 until stagesArray.length()).map { index ->
+                stagesArray.getJSONObject(index).let { it.optString("label") to it.optInt("count") }
+            },
+            workload = (0 until workloadArray.length()).map { index ->
+                val item = workloadArray.getJSONObject(index)
+                DashboardWorkload(
+                    username = item.optString("username"), fullName = item.optString("fullName"),
+                    active = item.optInt("active"), overdue = item.optInt("overdue"), stale = item.optInt("stale"),
+                    blockers = item.optInt("blockers"), pendingEvaluations = item.optInt("pendingEvaluations"),
+                    concludedMonth = item.optInt("concludedMonth"), lastSync = item.optString("lastSync").takeIf { it.isNotBlank() },
+                    pendingSync = item.optInt("pendingSync"), syncErrors = item.optInt("syncErrors")
+                )
+            },
+            overdue = records("overdue"), stale = records("stale"),
+            pendingEvaluations = records("pendingEvaluations"), blockers = records("blockers"),
+            syncErrors = (0 until syncArray.length()).map { index ->
+                val item = syncArray.getJSONObject(index)
+                DashboardSyncError(
+                    fullName = item.optString("fullName"), appVersion = item.optString("appVersion"),
+                    lastSeen = item.optString("lastSeen"), pendingCount = item.optInt("pendingCount"),
+                    error = item.optString("error")
+                )
+            },
+            implantadores = options("implantadores", "username", "full_name"),
+            stages = options("stages", "value", "label")
+        )
+    }
+
     private fun authenticatedJsonConnection(url: String, method: String, body: String? = null): Pair<Int, String> {
         val connection = (URL(url).openConnection() as HttpURLConnection).apply {
             requestMethod = method
@@ -251,8 +352,20 @@ class CentralSyncClient(private val context: Context) {
     }
 
     private fun serverException(status: Int, body: String): ServerReportException {
-        val message = runCatching { JSONObject(body).optString("error") }.getOrDefault("")
-            .ifBlank { "Servidor respondeu HTTP $status" }
-        return ServerReportException(status, message)
+        val root = runCatching { JSONObject(body) }.getOrDefault(JSONObject())
+        val code = root.optString("code")
+        val requirementsArray = root.optJSONArray("requirements") ?: JSONArray()
+        val requirements = (0 until requirementsArray.length()).mapNotNull { index ->
+            requirementsArray.optJSONObject(index)?.let { item ->
+                val label = item.optString("label").trim()
+                val section = item.optString("section").trim()
+                if (label.isBlank()) null else if (section.isBlank()) label else "$section: $label"
+            }
+        }
+        val baseMessage = root.optString("error").ifBlank { "Servidor respondeu HTTP $status" }
+        val message = if (code == "required_items_missing" && requirements.isNotEmpty()) {
+            "$baseMessage — ${requirements.joinToString("; ")}"
+        } else baseMessage
+        return ServerReportException(status, code, requirements, message)
     }
 }

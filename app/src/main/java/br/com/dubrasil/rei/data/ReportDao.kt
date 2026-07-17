@@ -5,6 +5,7 @@ import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
 
+/** Consultas locais. A fila de sincronização é definida exclusivamente por [getPendingSync]. */
 @Dao
 interface ReportDao {
     @Query("SELECT * FROM reports WHERE status = 'DRAFT' ORDER BY updatedAt DESC LIMIT 1")

@@ -7,13 +7,23 @@
   <link rel="icon" href="/web/assets/favicon.ico" sizes="any">
   <link rel="icon" type="image/png" href="/web/assets/favicon-192.png">
   <link rel="apple-touch-icon" href="/web/assets/favicon-192.png">
-  <script>!function(){var m=localStorage.getItem("reiTheme")||"system",d=m==="dark"||(m==="system"&&matchMedia("(prefers-color-scheme: dark)").matches);document.documentElement.dataset.theme=d?"dark":"light";document.documentElement.dataset.themeMode=m;document.documentElement.style.colorScheme=d?"dark":"light"}();</script>
-  <link rel="stylesheet" href="/web/styles.css?v=20260714-dark-theme">
+  <script>
+    // Aplica o tema antes da primeira pintura para evitar a troca visível de cores.
+    (() => {
+      const mode = localStorage.getItem("reiTheme") || "system";
+      const followsDarkSystem = matchMedia("(prefers-color-scheme: dark)").matches;
+      const dark = mode === "dark" || (mode === "system" && followsDarkSystem);
+      document.documentElement.dataset.theme = dark ? "dark" : "light";
+      document.documentElement.dataset.themeMode = mode;
+      document.documentElement.style.colorScheme = dark ? "dark" : "light";
+    })();
+  </script>
+  <link rel="stylesheet" href="/web/styles.css?v=20260716-dark-contrast">
 </head>
 <body>
   <div id="app"></div>
   <template id="print-template"></template>
   <script src="/web/schema.js?v=20260714-dark-theme"></script>
-  <script src="/web/app.js?v=20260715-supervisor-home"></script>
+  <script src="/web/app.js?v=20260716-dark-contrast"></script>
 </body>
 </html>

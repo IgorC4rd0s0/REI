@@ -11,6 +11,12 @@ import org.json.JSONObject
 import java.util.UUID
 import java.util.concurrent.Executors
 
+/**
+ * Camada de persistência do aplicativo.
+ *
+ * As gravações são serializadas em uma única fila para preservar a ordem das alterações locais.
+ * Cada relatório é salvo individualmente, evitando recolocar todo o histórico na fila de sync.
+ */
 class ReportRepository(context: Context) {
     private val appContext = context.applicationContext
     private val dao = ReiDatabase.getInstance(appContext).reportDao()
@@ -19,6 +25,7 @@ class ReportRepository(context: Context) {
 
     init {
         SchemaStore(appContext).applyCached()
+        // A migração é idempotente: instalações antigas podem abrir sem perder rascunhos.
         migrateLegacyStorage()
         SyncScheduler.enqueue(appContext)
     }
@@ -88,6 +95,9 @@ class ReportRepository(context: Context) {
 
     fun loadDeviceStatuses(): List<DeviceSyncStatus> =
         CentralSyncClient(appContext).fetchDeviceStatuses().getOrDefault(emptyList())
+
+    fun loadSupervisorDashboard(filters: SupervisorDashboardFilters): SupervisorDashboard? =
+        CentralSyncClient(appContext).fetchSupervisorDashboard(filters).getOrNull()
 
     fun syncNow(): SyncRunResult {
         val client = CentralSyncClient(appContext)

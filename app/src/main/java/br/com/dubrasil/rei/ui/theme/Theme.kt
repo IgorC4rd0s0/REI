@@ -36,20 +36,20 @@ private val ReiLightColors = lightColorScheme(
 )
 
 private val ReiDarkColors = darkColorScheme(
-    primary = Color(0xFFB7C5FF),
-    onPrimary = Color(0xFF102158),
-    primaryContainer = Color(0xFF263A7A),
-    onPrimaryContainer = Color(0xFFDDE3FF),
-    secondary = Color(0xFF8BD477),
+    primary = Color(0xFFAFC0FF),
+    onPrimary = Color(0xFF0B1B4F),
+    primaryContainer = Color(0xFF30478F),
+    onPrimaryContainer = Color(0xFFF1F4FF),
+    secondary = Color(0xFF91DA7D),
     onSecondary = Color(0xFF12380D),
-    background = Color(0xFF0D1220),
-    onBackground = Color(0xFFEEF2FF),
-    surface = Color(0xFF171D2B),
-    onSurface = Color(0xFFEEF2FF),
-    surfaceVariant = Color(0xFF222A3B),
-    onSurfaceVariant = Color(0xFFC2CBDD),
-    outline = Color(0xFF4B566E),
-    outlineVariant = Color(0xFF343D51),
+    background = Color(0xFF080E1B),
+    onBackground = Color(0xFFF7F9FF),
+    surface = Color(0xFF151D2D),
+    onSurface = Color(0xFFF7F9FF),
+    surfaceVariant = Color(0xFF222D42),
+    onSurfaceVariant = Color(0xFFD4DBEA),
+    outline = Color(0xFF5B6884),
+    outlineVariant = Color(0xFF414D66),
     error = Color(0xFFFFB4AB),
     onError = Color(0xFF690005)
 )

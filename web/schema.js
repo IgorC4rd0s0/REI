@@ -1,3 +1,4 @@
+// Esquema padrão da web. As chaves devem permanecer compatíveis com ReportSchema.kt.
 window.REI_SCHEMA = {
   modules: [
     "Manifesto", "Financeiro", "Nota Fiscal Eletrônica", "Emissão de NFC-e",
@@ -31,7 +32,16 @@ window.REI_SCHEMA = {
     ["Cadastros", ["Cadastro de cliente/fornecedor", "Cadastro de grupo", "Tributação do produto", "Tipo do item", "Produto ou serviço", "Ajuste de saldo"]],
     ["Entradas", ["Manifesto", "Pedido de compra", "NF-e com financeiro", "NF-e sem financeiro", "Extrato de compra", "Energia", "Telecomunicação", "Conhecimento de frete", "Importação de CT-e", "Devolução de compra com NF-e", "Devolução de compra sem NF-e"]],
     ["Saídas", ["Cupom fiscal", "NF-e de venda", "NFS-e", "Extrato de venda", "Devolução de venda com NF-e", "Devolução de venda sem NF-e", "NF-e referente a cupom fiscal", "NF-e de outras saídas"]],
-    ["Outros", ["Configuração de etiquetas", "Configuração de e-mail", "Movimentos de ajuste de saldo (F10)", "Treinamento de perfil de usuário"]]
+    ["Outros", [
+      "Configuração de etiquetas", "Configuração de e-mail", "Movimentos de ajuste de saldo (F10)",
+      "Treinamento de perfil de usuário", "Configurar e testar o fluxo de Ordem de Serviço",
+      "Validar separação de produtos e serviços no faturamento", "Configurar e testar balança",
+      "Configurar e testar controle de lote", "Configurar composição de produtos",
+      "Configurar produtos similares", "Configurar controle de série do produto",
+      "Configurar e testar comissão", "Configurar formação de preço e custos",
+      "Configurar e testar PDV online", "Configurar PDV offline e sincronização",
+      "Validar e testar customizações contratadas"
+    ]]
   ],
   finance: [
     ["Cadastros", ["Cadastrar conta/caixa", "Cadastrar forma de pagamento", "Cadastro de contas a pagar/receber (F7)"]],
@@ -52,7 +62,35 @@ window.REI_SCHEMA = {
     ["Aprimoramento e postura", ["Proatividade e iniciativa", "Pontualidade e compromisso", "Busca constante por aprendizado técnico"]]
   ],
   itemLabel(item) { return String(item && typeof item === "object" ? item.label : item || "").trim(); },
-  key(scope, group, item) { return `${scope}::${group}::${this.itemLabel(item)}`; },
+  itemType(item) { return item && typeof item === "object" ? String(item.type || "checkbox") : "checkbox"; },
+  legacyKey(scope, group, item) {
+    const prefix = this.itemType(item) === "checkbox" ? "" : "reiField::";
+    return `${prefix}${scope}::${group}::${this.itemLabel(item)}`;
+  },
+  key(scope, group, item) {
+    return String(item && typeof item === "object" && item.key ? item.key : this.legacyKey(scope, group, item));
+  },
+  normalizeItem(scope, group, raw, forcedType = "") {
+    const label = this.itemLabel(raw);
+    const type = forcedType || this.itemType(raw);
+    const legacyKey = `${type === "checkbox" ? "" : "reiField::"}${scope}::${group}::${label}`;
+    const source = raw && typeof raw === "object" ? raw : {};
+    return {
+      key: String(source.key || legacyKey),
+      label,
+      type,
+      options: Array.isArray(source.options) ? [...source.options] : [],
+      requiredMode: String(source.requiredMode || "never"),
+      requiredWhen: source.requiredWhen || null,
+      legacyKeys: [...new Set([...(Array.isArray(source.legacyKeys) ? source.legacyKeys : []), ...(source.key && source.key !== legacyKey ? [legacyKey] : [])])]
+    };
+  },
+  normalize() {
+    this.modules = this.modules.map(item => this.normalizeItem("dados", "modulos", item, "checkbox"));
+    [["technical", "tecnico"], ["stock", "estoque"], ["finance", "financeiro"], ["fiscal", "fiscal"], ["supervision", "supervisao"]].forEach(([area, scope]) => {
+      this[area] = this[area].map(([group, items]) => [group, items.map(item => this.normalizeItem(scope, group, item))]);
+    });
+  },
   moduleKey(item) { return this.key("dados", "modulos", item); },
   allDeliveryKeys() {
     return [
@@ -67,3 +105,5 @@ window.REI_SCHEMA = {
     return this.supervision.flatMap(([group, items]) => items.filter(item => !(item && typeof item === "object") || (item.type || "text") === "checkbox").map(item => this.key("supervisao", group, item)));
   }
 };
+
+window.REI_SCHEMA.normalize();

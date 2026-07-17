@@ -2,12 +2,15 @@ const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const app = $("#app");
 const S = window.REI_SCHEMA;
+// Estado de sessão e navegação. Os dados definitivos continuam no servidor.
 const state = {
   token: localStorage.reiToken || "",
   user: null,
   reports: [],
   users: [],
   deviceHeartbeats: [],
+  supervisorDashboard: null,
+  managerFilters: { implantador: "", period: "90", stage: "", overdue: false, blockers: false, staleDays: "7" },
   view: "login",
   editing: null,
   step: 0,
@@ -15,7 +18,10 @@ const state = {
   dashboardFilter: "levantamentos",
   dashboardArea: "home",
   viewingSurveyReadOnly: false,
-  schemaLoaded: false
+  schemaLoaded: false,
+  schemaVersion: "",
+  fixedRequirements: {},
+  validationTarget: null
 };
 const THEME_MODES = new Set(["system", "light", "dark"]);
 
@@ -63,6 +69,7 @@ const surveySections = [
     ["financeiroConciliacao", "Utiliza Conciliação bancária?", "choice", yesNo],
     ["financeiroCartao", "Utiliza Controle de cartão?", "choice", yesNo],
     ["financeiroCartaoMaquina", "Qual máquina utilizada?", "text"],
+    ["financeiroTipoIntegracaoBoleto", "Tipo de integração do boleto", "choice", ["Arquivo de remessa e retorno", "API", "Ambos"]],
     ["financeiroCheque", "Utiliza Controle de cheque?", "choice", yesNo],
     ["financeiroDescontoTitulo", "Utiliza Desconto de Título?", "choice", yesNo],
     ["financeiroPrevisaoFutura", "Utiliza Previsão futura de Contas a Pagar?", "choice", yesNo],
@@ -122,15 +129,24 @@ function icon(name) {
   };
   return `<svg class="ico" viewBox="0 0 24 24" aria-hidden="true">${paths[name] || paths.file}</svg>`;
 }
-function fmtDate(ms) { return ms ? new Date(ms).toLocaleDateString("pt-BR") : "-"; }
+function fmtDate(ms) {
+  return ms ? new Date(ms).toLocaleDateString("pt-BR") : "-";
+}
 function api(path, options = {}) {
+  // Centraliza autenticação e converte os erros JSON em mensagens da interface.
   const headers = { "Accept": "application/json", ...(options.headers || {}) };
   if (state.token) headers.Authorization = `Bearer ${state.token}`;
   if (options.body && !(options.body instanceof FormData)) headers["Content-Type"] = "application/json; charset=utf-8";
   return fetch(path, { ...options, headers }).then(async r => {
     const text = await r.text();
     const data = text ? JSON.parse(text) : {};
-    if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+    if (!r.ok) {
+      const error = new Error(data.error || `HTTP ${r.status}`);
+      error.status = r.status;
+      error.code = data.code || "";
+      error.requirements = Array.isArray(data.requirements) ? data.requirements : [];
+      throw error;
+    }
     return data;
   });
 }
@@ -138,27 +154,28 @@ function sameText(a, b) {
   return schemaItemLabel(a).toLowerCase() === schemaItemLabel(b).toLowerCase();
 }
 function schemaItemLabel(item) { return String(item && typeof item === "object" ? item.label : item || "").trim(); }
-function schemaItemType(item) { return item && typeof item === "object" ? String(item.type || "text") : "checkbox"; }
+function schemaItemType(item) { return item && typeof item === "object" ? String(item.type || "checkbox") : "checkbox"; }
 function schemaItemOptions(item) { return item && typeof item === "object" && Array.isArray(item.options) ? item.options : []; }
-function schemaFieldKey(scope, group, item) { return `reiField::${scope}::${group}::${schemaItemLabel(item)}`; }
-function appendUniqueText(list, value) {
+function schemaItemKey(scope, group, item) { return S.key(scope, group, item); }
+function schemaFieldKey(scope, group, item) { return schemaItemKey(scope, group, item); }
+function schemaItemKeys(scope, group, item) {
+  const definition = item && typeof item === "object" ? item : S.normalizeItem(scope, group, item);
+  return [...new Set([schemaItemKey(scope, group, definition), ...(Array.isArray(definition.legacyKeys) ? definition.legacyKeys : []), S.legacyKey(scope, group, definition)])];
+}
+function schemaItemRequiredMode(item) { return String(item && typeof item === "object" ? item.requiredMode || "never" : "never"); }
+function schemaItemRequiredWhen(item) { return item && typeof item === "object" && item.requiredWhen ? item.requiredWhen : null; }
+function appendUniqueText(list, value, scope, group, forcedType = "") {
   const clean = schemaItemLabel(value);
   if (!clean) return;
-  const existingIndex = list.findIndex(item => sameText(item, clean));
-  const normalized = value && typeof value === "object"
-    ? { label: clean, type: String(value.type || "text"), options: schemaItemOptions(value) }
-    : clean;
+  const normalized = S.normalizeItem(scope, group, value, forcedType);
+  const existingIndex = list.findIndex(item => schemaItemKey(scope, group, item) === normalized.key || sameText(item, clean));
   if (existingIndex < 0) {
     list.push(normalized);
     return;
   }
-  // A definição tipada do servidor deve substituir itens legados em texto puro.
-  // Caso contrário, um campo "text" antigo continua sendo exibido como checkbox.
-  if (normalized && typeof normalized === "object" && typeof list[existingIndex] !== "object") {
-    list[existingIndex] = normalized;
-  }
+  list[existingIndex] = normalized;
 }
-function appendSchemaGroup(areaList, title, items = []) {
+function appendSchemaGroup(areaList, scope, title, items = []) {
   const cleanTitle = String(title || "").trim();
   if (!cleanTitle) return;
   let group = areaList.find(([groupTitle]) => sameText(groupTitle, cleanTitle));
@@ -166,7 +183,7 @@ function appendSchemaGroup(areaList, title, items = []) {
     group = [cleanTitle, []];
     areaList.push(group);
   }
-  items.forEach(item => appendUniqueText(group[1], item));
+  items.forEach(item => appendUniqueText(group[1], item, scope, cleanTitle));
 }
 function appendSurveyField(sectionFields, field) {
   const key = String(field?.key || "").trim();
@@ -174,9 +191,16 @@ function appendSurveyField(sectionFields, field) {
   const type = String(field?.type || "text").trim();
   if (!key || !label) return;
   let normalized;
-  if (type === "choice") normalized = [key, label, "choice", Array.isArray(field.options) && field.options.length ? field.options : ["Sim", "Não"]];
-  else if (type === "textarea") normalized = [key, label, "textarea", 3];
-  else normalized = [key, label, type];
+  const metadata = {
+    key, label, type,
+    options: Array.isArray(field.options) ? field.options : [],
+    requiredMode: String(field.requiredMode || "never"),
+    requiredWhen: field.requiredWhen || null,
+    legacyKeys: Array.isArray(field.legacyKeys) ? field.legacyKeys : []
+  };
+  if (type === "choice") normalized = [key, label, "choice", metadata.options.length ? metadata.options : ["Sim", "Não"], metadata];
+  else if (type === "textarea") normalized = [key, label, "textarea", 3, metadata];
+  else normalized = [key, label, type, null, metadata];
   const existingIndex = sectionFields.findIndex(([existingKey]) => existingKey === key);
   if (existingIndex >= 0) sectionFields[existingIndex] = normalized;
   else sectionFields.push(normalized);
@@ -184,12 +208,13 @@ function appendSurveyField(sectionFields, field) {
 function applySchemaOverrides(overrides) {
   if (!overrides || typeof overrides !== "object") return;
   const rei = overrides.rei || {};
-  (rei.modules || []).forEach(item => appendUniqueText(S.modules, item));
-  ["technical", "stock", "finance", "fiscal", "supervision"].forEach(area => {
+  (rei.modules || []).forEach(item => appendUniqueText(S.modules, item, "dados", "modulos", "checkbox"));
+  [["technical", "tecnico"], ["stock", "estoque"], ["finance", "financeiro"], ["fiscal", "fiscal"], ["supervision", "supervisao"]].forEach(([area, scope]) => {
     (rei[area] || []).forEach(group => appendSchemaGroup(
       S[area],
+      scope,
       group.title,
-      (group.items || []).map(item => item && typeof item === "object" ? item : { label: item, type: "text" })
+      group.items || []
     ));
   });
   (overrides.levantamento || []).forEach(section => {
@@ -202,12 +227,195 @@ function applySchemaOverrides(overrides) {
     }
     (section.fields || []).forEach(field => appendSurveyField(target[1], field));
   });
+  state.schemaVersion = String(overrides.schemaVersion || "");
+  state.fixedRequirements = overrides.validation?.fixed || {};
 }
 async function loadSchemaOverrides() {
   if (state.schemaLoaded) return;
   const overrides = await api("/api/schema-overrides").catch(() => null);
   applySchemaOverrides(overrides);
   state.schemaLoaded = true;
+}
+
+function normalizedComparison(value) {
+  return String(value ?? "").normalize("NFKC").trim().replace(/\s+/g, " ").toLocaleLowerCase("pt-BR");
+}
+function surveyDefinition(item) {
+  return item?.[4] || { key: item?.[0] || "", label: item?.[1] || "", type: item?.[2] || "text", options: Array.isArray(item?.[3]) ? item[3] : [], requiredMode: "never", requiredWhen: null, legacyKeys: [] };
+}
+function allSchemaDefinitions() {
+  const definitions = [];
+  S.modules.forEach(item => definitions.push(item));
+  [[S.technical, "tecnico"], [S.stock, "estoque"], [S.finance, "financeiro"], [S.fiscal, "fiscal"], [S.supervision, "supervisao"]].forEach(([groups]) => {
+    groups.forEach(([, items]) => items.forEach(item => definitions.push(item)));
+  });
+  surveySections.forEach(([, fields]) => fields.forEach(item => definitions.push(surveyDefinition(item))));
+  Object.values(state.fixedRequirements || {}).flat().forEach(item => definitions.push(item));
+  return definitions;
+}
+function definitionKeys(definition) {
+  return [...new Set([String(definition?.key || ""), ...(Array.isArray(definition?.legacyKeys) ? definition.legacyKeys.map(String) : [])].filter(Boolean))];
+}
+function schemaDefinitionByKey(key) {
+  return allSchemaDefinitions().find(definition => definitionKeys(definition).includes(String(key))) || null;
+}
+function checkedRequirement(reportData, key) {
+  const checks = new Set(reportData?.checks || []);
+  const definition = schemaDefinitionByKey(key);
+  const keys = definition ? definitionKeys(definition) : [String(key)];
+  return keys.some(candidate => checks.has(candidate));
+}
+function valueForRequirement(reportData, key) {
+  if (key === "deliveryStatus") return reportData?.deliveryStatus || "";
+  if (key === "rating") return reportData?.rating || "";
+  return reportData?.fields?.[key] || "";
+}
+function evaluateRuleCondition(reportData, item) {
+  if (item?.match && !item?.source) return evaluateRequiredWhen(reportData, item);
+  const source = String(item?.source || "");
+  const operator = String(item?.operator || "");
+  if (source === "module" || source === "checklist") {
+    const checked = checkedRequirement(reportData, item.key);
+    return operator === "checked" ? checked : !checked;
+  }
+  const value = valueForRequirement(reportData, item?.key);
+  const expected = item?.value ?? "";
+  if (operator === "equals") return normalizedComparison(value) === normalizedComparison(expected);
+  if (operator === "not_equals") return normalizedComparison(value) !== normalizedComparison(expected);
+  if (operator === "not_blank") return String(value).trim() !== "";
+  if (operator === "blank") return String(value).trim() === "";
+  if (operator === "greater_than") {
+    const actualNumber = Number(String(value).replace(",", "."));
+    const expectedNumber = Number(String(expected).replace(",", "."));
+    return Number.isFinite(actualNumber) && Number.isFinite(expectedNumber) && actualNumber > expectedNumber;
+  }
+  return false;
+}
+function evaluateRequiredWhen(reportData, rule) {
+  const results = (rule?.conditions || []).filter(item => item && typeof item === "object").map(item => evaluateRuleCondition(reportData, item));
+  if (!results.length) return false;
+  return rule?.match === "all" ? results.every(Boolean) : results.some(Boolean);
+}
+function conditionSummaryText(rule) {
+  const labels = new Map(allSchemaDefinitions().map(definition => [String(definition.key || ""), definition.label || definition.key]));
+  const operators = { checked: "está marcado", not_checked: "não está marcado", equals: "é igual a", not_equals: "é diferente de", not_blank: "está preenchido", blank: "está vazio", greater_than: "é maior que" };
+  const parts = (rule?.conditions || []).map(item => {
+    if (item?.match && !item?.source) return `(${conditionSummaryText(item)})`;
+    const suffix = ["equals", "not_equals", "greater_than"].includes(item?.operator) ? ` ${item?.value ?? ""}` : "";
+    return `${labels.get(String(item?.key || "")) || item?.key || "Campo"} ${operators[item?.operator] || ""}${suffix}`.trim();
+  });
+  return parts.join(rule?.match === "all" ? " e " : " ou ") || "Condição configurada";
+}
+function requirementActive(reportData, definition) {
+  const mode = String(definition?.requiredMode || "never");
+  return mode === "always" || (mode === "conditional" && evaluateRequiredWhen(reportData, definition?.requiredWhen));
+}
+function validImageOrUri(value) {
+  const text = String(value || "").trim();
+  return /^data:image\//i.test(text) || /^(content|file|https?):\/\//i.test(text);
+}
+function requirementFulfilled(reportData, definition) {
+  const type = String(definition?.type || "text");
+  if (type === "checkbox") return definitionKeys(definition).some(key => checkedRequirement(reportData, key));
+  const values = definitionKeys(definition).map(key => valueForRequirement(reportData, key));
+  if (definition?.key === "empresa") values.push(valueForRequirement(reportData, "cliente"));
+  const value = values.find(candidate => String(candidate || "").trim()) || "";
+  if (type === "choice") {
+    const options = new Set((definition?.options || []).map(normalizedComparison));
+    return !!String(value).trim() && (!options.size || options.has(normalizedComparison(value)));
+  }
+  if (type === "photo") return validImageOrUri(value);
+  return String(value).trim() !== "";
+}
+function phaseRequirementDefinitions(phase) {
+  const result = [];
+  if (phase === "survey_completion" || phase === "rei_completion") {
+    surveySections.forEach(([section, fields]) => fields.forEach(item => result.push({ section, definition: surveyDefinition(item), target: "survey" })));
+  }
+  if (phase === "rei_completion") {
+    [["Técnico", "tecnico", S.technical], ["Estoque", "estoque", S.stock], ["Financeiro", "financeiro", S.finance], ["Fiscal", "fiscal", S.fiscal]].forEach(([area, scope, groups]) => {
+      groups.forEach(([group, items]) => items.forEach(item => result.push({ section: `${area} · ${group}`, definition: item, target: scope })));
+    });
+  }
+  if (phase === "supervision_submission") {
+    S.supervision.forEach(([group, items]) => items.forEach(item => result.push({ section: `Supervisão · ${group}`, definition: item, target: "supervisao" })));
+  }
+  (state.fixedRequirements?.[phase] || []).forEach(definition => result.push({ section: definition.section || "Relatório", definition, target: "fixed" }));
+  return result;
+}
+function validateRequiredRequirements(reportData, phase) {
+  const seen = new Set();
+  return phaseRequirementDefinitions(phase).flatMap(({ section, definition, target }) => {
+    const key = String(definition?.key || "");
+    if (!key || seen.has(key) || !requirementActive(reportData, definition)) return [];
+    seen.add(key);
+    if (requirementFulfilled(reportData, definition)) return [];
+    return [{
+      key,
+      label: definition.label || key,
+      section,
+      phase,
+      target,
+      reason: definition.type === "checkbox" ? "Marque este item obrigatório." : "Preencha este campo obrigatório.",
+      requiredBecause: definition.requiredMode === "conditional" ? conditionSummaryText(definition.requiredWhen) : "Obrigatório para concluir esta etapa."
+    }];
+  });
+}
+function validationSnapshot(reportData, phase) {
+  const active = phaseRequirementDefinitions(phase).map(item => item.definition).filter(definition => requirementActive(reportData, definition));
+  return JSON.stringify({ schemaVersion: state.schemaVersion || "cached", validatedAt: new Date().toISOString(), phase, requiredKeys: [...new Set(active.map(item => item.key))], fulfilledKeys: [...new Set(active.filter(item => requirementFulfilled(reportData, item)).map(item => item.key))] });
+}
+function requirementUi(definition, reportData) {
+  const active = requirementActive(reportData, definition);
+  const fulfilled = active && requirementFulfilled(reportData, definition);
+  return {
+    active,
+    fulfilled,
+    className: active ? ` required-active ${fulfilled ? "required-fulfilled" : "required-pending"}` : "",
+    label: active ? `<span class="required-star" aria-hidden="true">*</span><span class="required-chip">${fulfilled ? "Obrigatório · cumprido" : "Obrigatório"}</span>` : "",
+    reason: active && definition?.requiredMode === "conditional" ? `<small class="required-reason">${esc(conditionSummaryText(definition.requiredWhen))}</small>` : ""
+  };
+}
+function fixedRequirement(key) {
+  return Object.values(state.fixedRequirements || {}).flat().find(item => String(item?.key || "") === String(key)) || null;
+}
+function firstRequirementTarget(item) {
+  if (!item) return null;
+  if (item.phase === "survey_completion") {
+    const index = surveySections.findIndex(([title]) => title === item.section);
+    return { kind: "survey", index: Math.max(0, index) };
+  }
+  if (item.phase === "supervision_submission") return { kind: "supervision", index: 0 };
+  const section = normalizedComparison(item.section);
+  const index = section.includes("técnico") ? 1 : section.includes("estoque") ? 2 : section.includes("financeiro") ? 3 : section.includes("fiscal") ? 4 : section.includes("entrega") ? 5 : 0;
+  return { kind: "rei", index };
+}
+function showRequiredRequirements(requirements) {
+  const items = Array.isArray(requirements) ? requirements : [];
+  if (!items.length) return;
+  state.validationTarget = firstRequirementTarget(items[0]);
+  const grouped = items.reduce((acc, item) => { (acc[item.section || "Relatório"] ||= []).push(item); return acc; }, {});
+  document.body.insertAdjacentHTML("beforeend", `<div class="modal requirements-modal no-print" role="alertdialog" aria-modal="true" aria-labelledby="requiredRequirementsTitle">
+    <section class="card requirements-card"><h2 id="requiredRequirementsTitle">Itens obrigatórios pendentes</h2><p class="muted">Corrija todos os requisitos abaixo antes de finalizar.</p>
+      <div class="requirements-list">${Object.entries(grouped).map(([section, sectionItems]) => `<section><h3>${esc(section)}</h3>${sectionItems.map(item => `<article><b>${esc(item.label)}</b><span>${esc(item.reason)}</span><small>${esc(item.requiredBecause)}</small></article>`).join("")}</section>`).join("")}</div>
+      <div class="row"><button class="btn secondary" data-action="close-requirements">Fechar</button><button class="btn" data-action="go-first-requirement">Ir para o primeiro item</button></div>
+    </section></div>`);
+}
+function goToFirstRequirement() {
+  const target = state.validationTarget;
+  $(".requirements-modal")?.remove();
+  if (!target) return;
+  if (target.kind === "survey") { state.surveyStep = target.index; drawSurvey(); }
+  if (target.kind === "rei") { state.step = target.index; drawEditor(); }
+}
+function validateBeforeAction(payload, phase) {
+  const missing = validateRequiredRequirements(payload.report, phase);
+  if (missing.length) {
+    showRequiredRequirements(missing);
+    return false;
+  }
+  if (phase === "survey_completion" || phase === "rei_completion") payload.report.fields._requiredValidationSnapshot = validationSnapshot(payload.report, phase);
+  return true;
 }
 function newId() {
   if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
@@ -236,13 +444,12 @@ function reportPdfTitle(report) {
 function score(report) {
   const explicit = Number(String(field(report, "_supervisionScore")).replace(",", "."));
   if (!Number.isNaN(explicit)) return Math.max(0, Math.min(10, explicit));
-  const keys = S.supervisionKeys(), checks = new Set(report?.report?.checks || []);
-  const done = keys.filter(k => checks.has(k)).length;
-  return done ? done * 10 / keys.length : null;
+  const items = S.supervision.flatMap(([group, values]) => values.map(item => [group, item]));
+  const done = items.filter(([group, item]) => schemaItemKeys("supervisao", group, item).some(key => checkedRequirement(report?.report, key))).length;
+  return done ? done * 10 / items.length : null;
 }
 function hasEvaluation(report) {
-  const checks = new Set(report?.report?.checks || []);
-  return !!(report?.report?.rating || field(report, "_supervisionScore") || S.supervisionKeys().some(k => checks.has(k)));
+  return !!(report?.report?.rating || field(report, "_supervisionScore") || S.supervision.some(([group, items]) => items.some(item => schemaItemKeys("supervisao", group, item).some(key => checkedRequirement(report?.report, key)))));
 }
 function pendingSupervisorEvaluations() {
   if (state.user?.role !== "supervisor") return [];
@@ -291,8 +498,7 @@ function isConcludedDeliveryStatus(status) {
   return String(status || "").trim().toLowerCase().startsWith("conclu");
 }
 function deliveryCount(report) {
-  const checks = new Set(report?.report?.checks || []);
-  return S.allDeliveryKeys().filter(k => checks.has(k)).length;
+  return S.allDeliveryKeys().filter(key => checkedRequirement(report?.report, key)).length;
 }
 function reportDate(value) {
   const text = String(value || "").trim();
@@ -316,7 +522,7 @@ function shell(content) {
   const role = state.user?.role === "supervisor" ? "Supervisor" : "Implantador";
   app.innerHTML = `<div class="app">
     <header class="topbar no-print">
-            <div class=\"brand\"><img src=\"/web/assets/logo_dbs_app.png\" alt=\"DuBrasil Soluções\"></div>
+            <div class=\"brand\"><img class=\"theme-logo-light\" src=\"/web/assets/logo_dubrasil_blue.png\" alt=\"DuBrasil Soluções\"><img class=\"theme-logo-dark\" src=\"/web/assets/logo_dubrasil_white.png\" alt=\"\" aria-hidden=\"true\"></div>
       <div class="spacer"></div>
       ${state.user ? `<span class="pill">${esc(role)} · ${esc(state.user.fullName || state.user.username)}</span>
       ${state.user.role === "supervisor" ? `<a class="btn secondary" href="/admin">${icon("users")}Usuários</a>` : ""}
@@ -331,7 +537,7 @@ function renderAccountSettings() {
   const currentTheme = storedThemeMode();
   document.body.insertAdjacentHTML("beforeend", `<div class="modal no-print" role="dialog" aria-modal="true" aria-labelledby="accountSettingsTitle">
     <section class="card account-settings-card">
-      <div class="row"><div><h2 id="accountSettingsTitle">Configurações da conta</h2><p class="muted">Personalize a aparência e altere sua senha pessoal.</p></div><div class="spacer"></div><button class="btn secondary" data-action="close-modal">Fechar</button></div>
+      <div class="row"><div><h2 id="accountSettingsTitle">Configurações da conta</h2><p class="muted">Personalize a aparência e altere sua senha pessoal.</p></div><div class="spacer"></div><button class="btn secondary" data-action="close-modal" title="Fechar configurações" aria-label="Fechar">Fechar</button></div>
       <div class="theme-settings">
         <h3>Tema do sistema</h3><p class="muted">Escolha a aparência que deseja utilizar em todas as telas.</p>
         <div class="theme-options" role="radiogroup" aria-label="Tema do sistema">
@@ -344,7 +550,7 @@ function renderAccountSettings() {
           <div class="field"><label>Nova senha</label><input name="newPassword" type="password" minlength="8" autocomplete="new-password" required><small class="muted">Mínimo de 8 caracteres.</small></div>
           <div class="field"><label>Confirmar nova senha</label><input name="confirmation" type="password" minlength="8" autocomplete="new-password" required></div>
         </div>
-        <div class="row"><button class="btn" type="submit">Alterar minha senha</button><div class="spacer"></div><button class="btn danger" type="button" data-action="logout">${icon("logout")}Sair do sistema</button></div>
+        <div class="row"><button class="btn" type="submit">Alterar minha senha</button><div class="spacer"></div><button class="btn danger" type="button" data-action="logout" title="Sair do sistema" aria-label="Sair do sistema">${icon("logout")}Sair do sistema</button></div>
       </form>
     </section>
   </div>`);
@@ -365,7 +571,7 @@ function renderAccountSettings() {
 function renderLogin(error = "") {
   app.innerHTML = `<main class="login">
     <section class="card">
-            <div class=\"brand login-brand\"><img src=\"/web/assets/logo_dbs_app.png\" alt=\"DuBrasil Soluções\"></div>
+            <div class=\"brand login-brand\"><img class=\"theme-logo-light\" src=\"/web/assets/logo_dubrasil_blue.png\" alt=\"DuBrasil Soluções\"><img class=\"theme-logo-dark\" src=\"/web/assets/logo_dubrasil_white.png\" alt=\"\" aria-hidden=\"true\"></div>
       <h1>Acesso web</h1>
       <p class="muted">Entre com o usuário e senha para acessar o sistema.</p>
       ${error ? `<div class="error">${esc(error)}</div>` : ""}
@@ -403,6 +609,16 @@ async function loadUsers() {
 async function loadDeviceHeartbeats() {
   state.deviceHeartbeats = await api("/api/device-heartbeats").catch(() => []);
 }
+async function loadSupervisorDashboard() {
+  if (state.user?.role !== "supervisor") { state.supervisorDashboard = null; return; }
+  const filters = state.managerFilters;
+  const params = new URLSearchParams({ period: filters.period, staleDays: filters.staleDays });
+  if (filters.implantador) params.set("implantador", filters.implantador);
+  if (filters.stage) params.set("stage", filters.stage);
+  if (filters.overdue) params.set("overdue", "1");
+  if (filters.blockers) params.set("blockers", "1");
+  state.supervisorDashboard = await api(`/api/dashboard/supervisor?${params}`).catch(error => ({ error: error.message }));
+}
 function assignedUsername(r) {
   return String(r?.report?.fields?._assignedImplantadorUsername || r?.payload?.report?.fields?._assignedImplantadorUsername || "").trim().toLowerCase();
 }
@@ -422,6 +638,7 @@ function reportScope() {
 }
 
 function renderDashboardHome() {
+  // A página inicial é deliberadamente objetiva: operações, resumo e gráficos.
   const reports = state.reports;
   const scoped = reportScope();
   const surveys = scoped.filter(r => ["levantamento_pendente", "rei_pendente"].includes(stage(r)));
@@ -445,7 +662,6 @@ function renderDashboardHome() {
         <b>${surveys.length}</b>
       </button>
     </section>
-    ${deviceSyncPanel()}
     <div class="section-title"><h2>Resumo rápido</h2></div>
     <section class="grid metrics">
       ${metric("Implantações", implementations.length, "briefcase")}
@@ -591,6 +807,64 @@ function deviceSyncPanel() {
     <div class="sync-device-list">${rows || `<p class="muted">Nenhum dispositivo enviou diagnóstico ainda.</p>`}</div>
   </section>`;
 }
+function managerDashboardHtml() {
+  if (state.user?.role !== "supervisor") return "";
+  const dashboard = state.supervisorDashboard;
+  if (!dashboard) return `<section class="card manager-fallback"><h2>Visão gerencial</h2><p class="muted">O painel gerencial será carregado quando o servidor estiver disponível. O dashboard operacional permanece acessível abaixo.</p></section>`;
+  if (dashboard.error) return `<section class="card manager-fallback"><h2>Visão gerencial indisponível</h2><p class="error">${esc(dashboard.error)}</p><p class="muted">O dashboard operacional permanece disponível abaixo.</p></section>`;
+  const indicators = dashboard.indicators || {};
+  const options = dashboard.filterOptions || { implantadores: [], stages: [] };
+  const filters = state.managerFilters;
+  const indicatorCards = [
+    ["Registros", indicators.total ?? 0, ""], ["Atrasados", indicators.overdue ?? 0, "danger"],
+    [`Parados há ${filters.staleDays} dias`, indicators.stale ?? 0, "warn"],
+    ["Avaliações pendentes", indicators.pendingEvaluations ?? 0, "warn"],
+    ["Impedimentos", indicators.blockers ?? 0, "danger"], ["Concluídos no mês", indicators.concludedMonth ?? 0, "ok"],
+    ["Média de duração", indicators.averageDurationDays == null ? "-" : `${indicators.averageDurationDays} dias`, ""],
+    ["Nota média", indicators.averageScore == null ? "-" : `${indicators.averageScore}/10`, "ok"],
+    ["Erros de sincronização", indicators.syncErrors ?? 0, "danger"]
+  ].map(([label, value, type]) => `<div class="manager-kpi ${type}"><span>${esc(label)}</span><b>${esc(value)}</b></div>`).join("");
+  const workload = (dashboard.workload || []).map(person => `<tr>
+    <td><strong>${esc(person.fullName)}</strong><small>@${esc(person.username || "sem atribuição")}</small></td>
+    <td>${person.active}</td><td class="danger-text">${person.overdue}</td><td>${person.stale}</td>
+    <td>${person.blockers}</td><td>${person.pendingEvaluations}</td><td>${person.concludedMonth}</td>
+    <td><span>${esc(formatManagerDate(person.lastSync))}</span><small>${person.pendingSync} pend. · ${person.syncErrors} erro(s)</small></td>
+  </tr>`).join("");
+  return `<section class="manager-dashboard">
+    <div class="section-title"><div><h2>Visão gerencial</h2><p class="muted section-subtitle">Gargalos, carga da equipe, avaliações e sincronização.</p></div><span class="muted">Atualizado em ${esc(formatManagerDate(dashboard.generatedAt))}</span></div>
+    <section class="card manager-filters">
+      <label>Implantador<select data-manager-filter="implantador"><option value="">Todos</option>${(options.implantadores || []).map(user => `<option value="${esc(user.username)}" ${filters.implantador === user.username ? "selected" : ""}>${esc(user.full_name)}</option>`).join("")}</select></label>
+      <label>Período<select data-manager-filter="period"><option value="30" ${filters.period === "30" ? "selected" : ""}>30 dias</option><option value="90" ${filters.period === "90" ? "selected" : ""}>90 dias</option><option value="365" ${filters.period === "365" ? "selected" : ""}>12 meses</option><option value="all" ${filters.period === "all" ? "selected" : ""}>Todo o histórico</option></select></label>
+      <label>Etapa<select data-manager-filter="stage"><option value="">Todas</option>${(options.stages || []).map(item => `<option value="${esc(item.value)}" ${filters.stage === item.value ? "selected" : ""}>${esc(item.label)}</option>`).join("")}</select></label>
+      <label>Parado há<select data-manager-filter="staleDays"><option value="3" ${filters.staleDays === "3" ? "selected" : ""}>3 dias</option><option value="7" ${filters.staleDays === "7" ? "selected" : ""}>7 dias</option><option value="15" ${filters.staleDays === "15" ? "selected" : ""}>15 dias</option><option value="30" ${filters.staleDays === "30" ? "selected" : ""}>30 dias</option></select></label>
+      <label class="manager-check"><input type="checkbox" data-manager-filter="overdue" ${filters.overdue ? "checked" : ""}>Somente atrasados</label>
+      <label class="manager-check"><input type="checkbox" data-manager-filter="blockers" ${filters.blockers ? "checked" : ""}>Com impedimentos</label>
+    </section>
+    <section class="manager-kpis">${indicatorCards}</section>
+    <section class="card manager-stage"><h3>Total por etapa</h3><div>${(dashboard.byStage || []).map(item => `<span><b>${item.count}</b>${esc(item.label)}</span>`).join("")}</div></section>
+    <section class="card manager-workload"><h3>Carga por implantador</h3><div class="manager-table-wrap"><table><thead><tr><th>Implantador</th><th>Ativos</th><th>Atras.</th><th>Parados</th><th>Imped.</th><th>Avaliar</th><th>Concl. mês</th><th>Último sync</th></tr></thead><tbody>${workload || `<tr><td colspan="8">Nenhum implantador encontrado.</td></tr>`}</tbody></table></div></section>
+    <section class="manager-lists">
+      ${managerRecordList("Atrasados", dashboard.lists?.overdue, "danger")}
+      ${managerRecordList("Registros parados", dashboard.lists?.stale, "warn")}
+      ${managerRecordList("Avaliações pendentes", dashboard.lists?.pendingEvaluations, "warn")}
+      ${managerRecordList("Impedimentos abertos", dashboard.lists?.blockers, "danger")}
+      ${managerSyncErrorList(dashboard.lists?.syncErrors)}
+    </section>
+  </section>`;
+}
+function managerRecordList(title, items = [], type = "") {
+  const rows = (items || []).map(item => `<button type="button" class="manager-list-row" data-action="manager-open" data-id="${esc(item.id)}"><span><strong>${esc(item.client)}</strong><small>${esc(item.assignedName)} · ${esc(item.stageLabel)}</small>${item.blocker ? `<small class="danger-text">${esc(item.blocker)}</small>` : ""}</span><span>${item.deadline ? `Prazo ${esc(formatManagerDate(item.deadline))}` : `${item.daysStale || 0} dia(s) sem atualizar`}</span></button>`).join("");
+  return `<article class="card manager-list ${type}"><h3>${esc(title)} <span>${(items || []).length}</span></h3>${rows || `<p class="muted">Nenhum registro.</p>`}</article>`;
+}
+function managerSyncErrorList(items = []) {
+  const rows = (items || []).map(item => `<div class="manager-list-row static"><span><strong>${esc(item.fullName)}</strong><small>App ${esc(item.appVersion)} · ${item.pendingCount} pendente(s)</small><small class="danger-text">${esc(item.error)}</small></span><span>${esc(formatManagerDate(item.lastSeen))}</span></div>`).join("");
+  return `<article class="card manager-list danger"><h3>Falhas de sincronização <span>${(items || []).length}</span></h3>${rows || `<p class="muted">Nenhuma falha.</p>`}</article>`;
+}
+function formatManagerDate(value) {
+  if (!value) return "Nunca";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString("pt-BR", { dateStyle: "short", timeStyle: "short" });
+}
 function workflowCard(group, active) {
   return `<button type="button" class="card metric workflow-card ${active ? "active" : ""}" data-action="dashboard-filter" data-filter="${esc(group.key)}">
     <span class="metric-icon">${icon(group.icon)}</span>
@@ -649,6 +923,7 @@ function latestEvaluations(items) {
 }
 
 function renderEditor(payload = blankReport()) {
+  // Edita uma cópia para que cancelar a tela não altere o histórico em memória.
   if (payload.payload) {
     state.editing = cloneData(payload.payload);
     state.editing.reportId = payload.id;
@@ -763,11 +1038,13 @@ function orderedSurveyFields(fields) {
 }
 function surveyField(item, f) {
   const [key, label, type, extra] = item;
+  const definition = surveyDefinition(item);
+  const ui = requirementUi(definition, state.editing.report);
   const value = f[key] || f[key === "empresa" ? "cliente" : key] || "";
-  if (type === "choice") return choice(key, label, value, extra);
-  if (type === "textarea") return textarea(key, label, value, extra || 3);
-  if (type === "photo") return `<div class="field dynamic-photo"><label>${esc(label)}</label>${value ? `<img src="${esc(value)}" alt="${esc(label)}">` : ""}<input type="file" accept="image/*" capture="environment" data-survey-photo-field="${esc(key)}"></div>`;
-  return input(key, label, value, false, type || "text");
+  if (type === "choice") return choice(key, label, value, extra, definition);
+  if (type === "textarea") return textarea(key, label, value, extra || 3, definition);
+  if (type === "photo") return `<div class="field dynamic-photo${ui.className}"><label>${esc(label)} ${ui.label}</label>${ui.reason}${value ? `<img src="${esc(value)}" alt="${esc(label)}">` : ""}<input type="file" accept="image/*" capture="environment" data-survey-photo-field="${esc(key)}"></div>`;
+  return input(key, label, value, false, type || "text", definition);
 }
 function drawEditor() {
   const p = state.editing, r = p.report, f = r.fields;
@@ -794,6 +1071,7 @@ function drawEditor() {
 }
 function stepHtml(name, p) {
   const f = p.report.fields;
+  const statusUi = requirementUi(fixedRequirement("deliveryStatus"), p.report);
   if (name === "ident") return `<div class="form-grid">
     ${input("cliente","Cliente / Projeto",f.cliente,true)}${input("consultor","Consultor",f.consultor)}
     ${input("usuariosTga","Usuários cadastrados",f.usuariosTga)}${input("inicio","Início",f.inicio,false,"date")}
@@ -804,34 +1082,35 @@ function stepHtml(name, p) {
   if (name === "finance") return groups("financeiro", S.finance, p);
   if (name === "fiscal") return groups("fiscal", S.fiscal, p);
   return `${textarea("servicosExecutados","Serviços executados",f.servicosExecutados)}
-    <div class="field"><label>Status</label><select data-field="deliveryStatus"><option></option><option ${p.report.deliveryStatus==="Concluído"?"selected":""}>Concluído</option><option ${p.report.deliveryStatus==="Concluído, mas deseja novos serviços"?"selected":""}>Concluído, mas deseja novos serviços</option><option ${p.report.deliveryStatus==="Não concluído"?"selected":""}>Não concluído</option></select></div>
+    <div class="field${statusUi.className}"><label>Status ${statusUi.label}</label>${statusUi.reason}<select data-field="deliveryStatus" required><option></option><option ${p.report.deliveryStatus==="Concluído"?"selected":""}>Concluído</option><option ${p.report.deliveryStatus==="Concluído, mas deseja novos serviços"?"selected":""}>Concluído, mas deseja novos serviços</option><option ${p.report.deliveryStatus==="Não concluído"?"selected":""}>Não concluído</option></select></div>
     ${textarea("pendencias","Pendências",f.pendencias)}
-    <div class="form-grid"><div>${signature("assinaturaAnalistaImagem","Assinatura do técnico",f.assinaturaAnalistaImagem)}</div><div>${signature("assinaturaClienteImagem","Assinatura do cliente",f.assinaturaClienteImagem)}</div></div>
+    <div class="form-grid signature-grid"><div>${signature("assinaturaAnalistaImagem","Assinatura do técnico",f.assinaturaAnalistaImagem)}</div><div>${signature("assinaturaClienteImagem","Assinatura do cliente",f.assinaturaClienteImagem)}</div></div>
     <div class="field"><label>Anexos / fotos</label><input type="file" id="files" multiple accept="image/*,.pdf"><input type="file" id="camera" accept="image/*" capture="environment"></div>
     <div class="attachments">${(p.report.attachments||[]).map(a=>`<div class="thumb">${a.uri?.startsWith("data:image")?`<img src="${a.uri}">`:""}<small>${esc(a.name)}</small></div>`).join("")}</div>`;
 }
-function input(key,label,value="",required=false,type="text"){return `<div class="field"><label>${esc(label)}</label><input data-field="${esc(key)}" value="${esc(value)}" type="${esc(type)}" ${required?"required":""}></div>`}
+function input(key,label,value="",required=false,type="text",definition=null,reportData=null){const ui=requirementUi(definition||fixedRequirement(key),reportData||state.editing?.report||{});return `<div class="field${ui.className}"><label>${esc(label)} ${ui.label}</label>${ui.reason}<input data-field="${esc(key)}" value="${esc(value)}" type="${esc(type)}" ${(required||ui.active)?"required":""}></div>`}
 function userSelect(key,label,value=""){
   const options = state.users.map(user => `<option value="${esc(user.username)}" ${user.username === value ? "selected" : ""}>${esc(user.full_name || user.fullName || user.username)} (${esc(user.username)})</option>`).join("");
   return `<div class="field"><label>${esc(label)}</label><select data-field="${key}" required><option value="">Selecione o implantador</option>${options}</select></div>`;
 }
-function choice(key,label,value="",options=[]){return `<div class="field survey-choice"><label>${esc(label)}</label><div class="choice-row">${options.map(option=>`<label><input type="radio" name="${esc(key)}" data-field="${esc(key)}" value="${esc(option)}" ${value===option?"checked":""}>${esc(option)}</label>`).join("")}</div></div>`}
-function textarea(key,label,value="",minLines=3){return `<div class="field"><label>${esc(label)}</label><textarea data-field="${key}" rows="${minLines}">${esc(value)}</textarea></div>`}
+function choice(key,label,value="",options=[],definition=null,reportData=null){const ui=requirementUi(definition||fixedRequirement(key),reportData||state.editing?.report||{});return `<div class="field survey-choice${ui.className}"><label>${esc(label)} ${ui.label}</label>${ui.reason}<div class="choice-row">${options.map(option=>`<label><input type="radio" name="${esc(key)}" data-field="${esc(key)}" value="${esc(option)}" ${value===option?"checked":""}>${esc(option)}</label>`).join("")}</div></div>`}
+function textarea(key,label,value="",minLines=3,definition=null,reportData=null){const ui=requirementUi(definition||fixedRequirement(key),reportData||state.editing?.report||{});return `<div class="field${ui.className}"><label>${esc(label)} ${ui.label}</label>${ui.reason}<textarea data-field="${key}" rows="${minLines}" ${ui.active?"required":""}>${esc(value)}</textarea></div>`}
 function dynamicReiField(scope, group, item, p) {
   const label = schemaItemLabel(item), type = schemaItemType(item), key = schemaFieldKey(scope, group, item);
-  const value = p.report.fields?.[key] || "";
-  if (type === "choice") return choice(key, label, value, schemaItemOptions(item).length ? schemaItemOptions(item) : ["Sim", "Não"]);
-  if (type === "textarea") return textarea(key, label, value, 3);
-  if (type === "photo") return `<div class="field dynamic-photo"><label>${esc(label)}</label>${value ? `<img src="${esc(value)}" alt="${esc(label)}">` : ""}<input type="file" accept="image/*" capture="environment" data-photo-field="${esc(key)}"></div>`;
-  return input(key, label, value, false, type || "text");
+  const value = schemaItemKeys(scope, group, item).map(candidate => p.report.fields?.[candidate] || "").find(Boolean) || "";
+  const ui = requirementUi(item, p.report);
+  if (type === "choice") return choice(key, label, value, schemaItemOptions(item).length ? schemaItemOptions(item) : ["Sim", "Não"], item, p.report);
+  if (type === "textarea") return textarea(key, label, value, 3, item, p.report);
+  if (type === "photo") return `<div class="field dynamic-photo${ui.className}"><label>${esc(label)} ${ui.label}</label>${ui.reason}${value ? `<img src="${esc(value)}" alt="${esc(label)}">` : ""}<input type="file" accept="image/*" capture="environment" data-photo-field="${esc(key)}"></div>`;
+  return input(key, label, value, false, type || "text", item, p.report);
 }
 function groups(scope, groupList, p){return groupList.map(([g,items])=>{
   const checklist = items.filter(item => schemaItemType(item) === "checkbox");
   const fields = items.filter(item => schemaItemType(item) !== "checkbox");
   return `<div class="group"><h3>${esc(g)}</h3>${checklist.length ? checks(checklist.map(i=>[scope,g,i]),p) : ""}${fields.length ? `<div class="form-grid dynamic-rei-fields">${fields.map(item => dynamicReiField(scope,g,item,p)).join("")}</div>` : ""}</div>`;
 }).join("")}
-function checks(items, p){const set=new Set(p.report.checks||[]);return `<div class="check-grid">${items.map(([s,g,i])=>{const label=schemaItemLabel(i),k=S.key(s,g,label);return `<label class="check"><input type="checkbox" data-check="${esc(k)}" ${set.has(k)?"checked":""}>${esc(label)}</label>`}).join("")}</div>`}
-function signature(key,label,value){return `<div class="field"><label>${esc(label)}</label><canvas class="signature" data-signature="${key}" data-value="${esc(value||"")}"></canvas><button type="button" class="btn secondary" data-action="clear-signature" data-key="${key}">Limpar</button></div>`}
+function checks(items, p){const set=new Set(p.report.checks||[]);return `<div class="check-grid">${items.map(([s,g,i])=>{const label=schemaItemLabel(i),k=S.key(s,g,i),aliases=schemaItemKeys(s,g,i),checked=aliases.some(key=>set.has(key)),ui=requirementUi(i,p.report);return `<label class="check${ui.className}"><input type="checkbox" data-check="${esc(k)}" data-check-aliases="${esc(encodeURIComponent(JSON.stringify(aliases)))}" ${checked?"checked":""}><span>${esc(label)} ${ui.label}${ui.reason}</span></label>`}).join("")}</div>`}
+function signature(key,label,value){const definition=fixedRequirement(key),ui=requirementUi(definition,state.editing?.report||{});return `<div class="field signature-field${ui.className}"><div class="signature-heading"><label>${esc(label)}</label>${ui.label}</div>${ui.reason}<canvas class="signature" data-signature="${key}" data-value="${esc(value||"")}" aria-label="${esc(label)}"></canvas><button type="button" class="btn secondary signature-clear" data-action="clear-signature" data-key="${key}">Limpar assinatura</button></div>`}
 function bindInputs() {
   $$("[data-field]").forEach(el => {
     const updateField = () => {
@@ -850,7 +1129,11 @@ function bindInputs() {
   });
   $$("[data-check]").forEach(el => el.onchange = () => {
     const set = new Set(state.editing.report.checks || []);
-    el.checked ? set.add(el.dataset.check) : set.delete(el.dataset.check);
+    const aliases = (() => {
+      try { return JSON.parse(decodeURIComponent(el.dataset.checkAliases || "")); }
+      catch { return [el.dataset.check]; }
+    })();
+    if (el.checked) set.add(el.dataset.check); else aliases.forEach(key => set.delete(key));
     state.editing.report.checks = [...set];
   });
   $$("[data-photo-field]").forEach(el => el.onchange = async () => {
@@ -873,16 +1156,63 @@ function bindInputs() {
   $$("canvas.signature").forEach(setupSignature);
 }
 function fileToAttachment(file) {
-  return new Promise(resolve => { const rd = new FileReader(); rd.onload = () => resolve({ name:file.name, mimeType:file.type||"application/octet-stream", uri:rd.result }); rd.readAsDataURL(file); });
+  return new Promise(resolve => {
+    const reader = new FileReader();
+    reader.onload = () => resolve({
+      name: file.name,
+      mimeType: file.type || "application/octet-stream",
+      uri: reader.result
+    });
+    reader.readAsDataURL(file);
+  });
 }
+
 function setupSignature(canvas) {
-  const key = canvas.dataset.signature, ctx = canvas.getContext("2d"); let drawing = false;
-  const resize = () => { const old = canvas.dataset.value; canvas.width = canvas.clientWidth * devicePixelRatio; canvas.height = canvas.clientHeight * devicePixelRatio; ctx.scale(devicePixelRatio, devicePixelRatio); ctx.lineWidth=2; ctx.lineCap="round"; if(old){const img=new Image();img.onload=()=>ctx.drawImage(img,0,0,canvas.clientWidth,canvas.clientHeight);img.src=old;} };
-  resize(); const pos=e=>{const r=canvas.getBoundingClientRect(),t=e.touches?.[0]||e;return{x:t.clientX-r.left,y:t.clientY-r.top}};
-  const start=e=>{drawing=true; const p=pos(e); ctx.beginPath(); ctx.moveTo(p.x,p.y); e.preventDefault();};
-  const move=e=>{if(!drawing)return; const p=pos(e); ctx.lineTo(p.x,p.y); ctx.stroke(); state.editing.report.fields[key]=canvas.toDataURL("image/png"); e.preventDefault();};
-  const end=()=>drawing=false;
-  canvas.onmousedown=canvas.ontouchstart=start; canvas.onmousemove=canvas.ontouchmove=move; canvas.onmouseup=canvas.onmouseleave=canvas.ontouchend=end;
+  const key = canvas.dataset.signature;
+  const context = canvas.getContext("2d");
+  let drawing = false;
+
+  const resize = () => {
+    const previousValue = canvas.dataset.value;
+    canvas.width = canvas.clientWidth * devicePixelRatio;
+    canvas.height = canvas.clientHeight * devicePixelRatio;
+    context.scale(devicePixelRatio, devicePixelRatio);
+    context.lineWidth = 2;
+    context.lineCap = "round";
+    if (previousValue) {
+      const image = new Image();
+      image.onload = () => context.drawImage(image, 0, 0, canvas.clientWidth, canvas.clientHeight);
+      image.src = previousValue;
+    }
+  };
+  const position = event => {
+    const bounds = canvas.getBoundingClientRect();
+    const pointer = event.touches?.[0] || event;
+    return { x: pointer.clientX - bounds.left, y: pointer.clientY - bounds.top };
+  };
+  const start = event => {
+    drawing = true;
+    const point = position(event);
+    context.beginPath();
+    context.moveTo(point.x, point.y);
+    event.preventDefault();
+  };
+  const move = event => {
+    if (!drawing) return;
+    const point = position(event);
+    context.lineTo(point.x, point.y);
+    context.stroke();
+    state.editing.report.fields[key] = canvas.toDataURL("image/png");
+    event.preventDefault();
+  };
+  const end = () => {
+    drawing = false;
+  };
+
+  resize();
+  canvas.onmousedown = canvas.ontouchstart = start;
+  canvas.onmousemove = canvas.ontouchmove = move;
+  canvas.onmouseup = canvas.onmouseleave = canvas.ontouchend = end;
 }
 
 function renderViewer(r, options = {}) {
@@ -918,9 +1248,9 @@ function surveyViewerHtml(fields) {
 function dl(items){return `<dl>${items.map(([k,v])=>`<dt>${esc(k)}</dt><dd>${esc(v||"Não informado")}</dd>`).join("")}</dl>`}
 function selected(groups, scope, checks, fields = {}) {
   const content = groups.map(([g,items]) => {
-    const marked = items.filter(i => schemaItemType(i) === "checkbox" && checks.has(S.key(scope,g,i))).map(i => `<span class="pill">${esc(schemaItemLabel(i))}</span>`).join(" ");
+    const marked = items.filter(i => schemaItemType(i) === "checkbox" && schemaItemKeys(scope,g,i).some(key => checks.has(key))).map(i => `<span class="pill">${esc(schemaItemLabel(i))}</span>`).join(" ");
     const values = items.filter(i => schemaItemType(i) !== "checkbox").map(i => {
-      const value = fields[schemaFieldKey(scope,g,i)];
+      const value = schemaItemKeys(scope,g,i).map(key => fields[key]).find(Boolean);
       if (!value) return "";
       return `<div class="dynamic-value"><small>${esc(schemaItemLabel(i))}</small>${schemaItemType(i) === "photo" ? `<img src="${esc(value)}" alt="${esc(schemaItemLabel(i))}">` : `<b>${esc(value)}</b>`}</div>`;
     }).filter(Boolean).join("");
@@ -929,7 +1259,7 @@ function selected(groups, scope, checks, fields = {}) {
   return content || "<p class='muted'>Nenhum dado informado.</p>";
 }
 function selectedCards(groups, scope, checks) {
-  const items = groups.flatMap(([g, list]) => list.filter(i => schemaItemType(i) === "checkbox" && checks.has(S.key(scope, g, i))).map(i => [g, schemaItemLabel(i)]));
+  const items = groups.flatMap(([g, list]) => list.filter(i => schemaItemType(i) === "checkbox" && schemaItemKeys(scope,g,i).some(key => checks.has(key))).map(i => [g, schemaItemLabel(i)]));
   if (!items.length) return `<p class="muted">Nenhum item marcado.</p>`;
   return `<div class="evaluation-checks">${items.map(([g, i]) => `<div class="evaluation-check"><small>${esc(g)}</small><span>${esc(i)}</span></div>`).join("")}</div>`;
 }
@@ -960,11 +1290,11 @@ function printReportHtml(r) {
   const evScore = score(r);
   return `<article class="print-report">
     <header class="print-header">
-      <div class="print-brand"><img src="/web/assets/logo_dubrasil.png" alt="DuBrasil Soluções"></div>
+      <div class="print-brand"><img src="/web/assets/logo_dubrasil_blue.png" alt="DuBrasil Soluções"></div>
       <div><h1>RELATÓRIO DE ENTREGA DE IMPLANTAÇÃO</h1><p>Sistema de Gestão TGA • R.E.I.</p></div>
     </header>
     ${pSection("MÓDULOS CONTRATADOS")}
-    ${pChecklist(S.modules, item => S.moduleKey(item), checks, 3)}
+    ${pChecklist(S.modules, item => schemaItemKeys("dados", "modulos", item), checks, 3)}
     ${pInfoTable([
       ["Cliente / Projeto", f.cliente], ["Consultor de implantação", f.consultor],
       ["Usuários cadastrados no TGA", f.usuariosTga], ["Início", f.inicio],
@@ -994,7 +1324,7 @@ function printSurveyHtml(r) {
   const data = r.report || {}, f = data.fields || {};
   return `<article class="print-report">
     <header class="print-header">
-      <div class="print-brand"><img src="/web/assets/logo_dubrasil.png" alt="DuBrasil Soluções"></div>
+      <div class="print-brand"><img src="/web/assets/logo_dubrasil_blue.png" alt="DuBrasil Soluções"></div>
       <div><h1>LEVANTAMENTO DE DADOS</h1><p>Sistema de Gestão TGA • Pré-implantação</p></div>
     </header>
     ${pSection("IDENTIFICAÇÃO DO CLIENTE")}
@@ -1028,21 +1358,21 @@ function pInfoTable(items) {
   return `<div class="print-info">${items.map(([k,v]) => `<div><small>${esc(k).toUpperCase()}</small><b>${esc(v || "—")}</b></div>`).join("")}</div>`;
 }
 function pChecklist(items, keyFor, checks, cols = 2) {
-  return `<div class="print-checks cols-${cols}">${items.map(item => `<div><span class="${checks.has(keyFor(item)) ? "on" : ""}"></span>${esc(schemaItemLabel(item))}</div>`).join("")}</div>`;
+  return `<div class="print-checks cols-${cols}">${items.map(item => { const value=keyFor(item),keys=Array.isArray(value)?value:[value];return `<div><span class="${keys.some(key=>checks.has(key)) ? "on" : ""}"></span>${esc(schemaItemLabel(item))}</div>`; }).join("")}</div>`;
 }
 function pGroups(scope, groups, checks, fields = {}) {
   return groups.map(([group, items]) => {
     const checklist = items.filter(item => schemaItemType(item) === "checkbox");
     const typed = items.filter(item => schemaItemType(item) !== "checkbox");
     const typedValues = typed.filter(item => schemaItemType(item) !== "photo").map(item => {
-      const value = fields[schemaFieldKey(scope,group,item)];
+      const value = schemaItemKeys(scope,group,item).map(key => fields[key]).find(Boolean);
       return [schemaItemLabel(item), value];
     });
     const photos = typed.filter(item => schemaItemType(item) === "photo").map(item => {
-      const value = fields[schemaFieldKey(scope,group,item)];
+      const value = schemaItemKeys(scope,group,item).map(key => fields[key]).find(Boolean);
       return value ? `<figure><figcaption>${esc(schemaItemLabel(item))}</figcaption><img src="${esc(value)}" alt="${esc(schemaItemLabel(item))}"></figure>` : "";
     }).filter(Boolean).join("");
-    return `<h3 class="print-subsection">${esc(group).toUpperCase()}</h3>${checklist.length ? pChecklist(checklist, item => S.key(scope, group, item), checks, 2) : ""}${typedValues.length ? pInfoTable(typedValues) : ""}${photos ? `<div class="print-attachments">${photos}</div>` : ""}`;
+    return `<h3 class="print-subsection">${esc(group).toUpperCase()}</h3>${checklist.length ? pChecklist(checklist, item => schemaItemKeys(scope, group, item), checks, 2) : ""}${typedValues.length ? pInfoTable(typedValues) : ""}${photos ? `<div class="print-attachments">${photos}</div>` : ""}`;
   }).join("");
 }
 function pParagraph(label, value) {
@@ -1081,6 +1411,7 @@ function waitForPrintImages() {
   }));
 }
 async function printCurrentReport() {
+  // Aguarda imagens e assinaturas antes de abrir o diálogo nativo de impressão.
   const previousTitle = document.title;
   document.title = reportPdfTitle(state.viewing);
   await waitForPrintImages();
@@ -1114,7 +1445,12 @@ function renderEvaluation(r) {
       $("[data-score-output]", modal).textContent = `${Number(el.value).toFixed(1)}/10`;
     }
   });
-  $$("[data-check]", modal).forEach(el => el.onchange = () => { el.checked ? checks.add(el.dataset.check) : checks.delete(el.dataset.check); r.report.checks=[...checks]; });
+  $$("[data-check]", modal).forEach(el => el.onchange = () => {
+    let aliases = [el.dataset.check];
+    try { aliases = JSON.parse(decodeURIComponent(el.dataset.checkAliases || "")); } catch {}
+    if (el.checked) checks.add(el.dataset.check); else aliases.forEach(key => checks.delete(key));
+    r.report.checks = [...checks];
+  });
 }
 async function savePayload(payload) {
   const normalized = {
@@ -1135,6 +1471,7 @@ async function savePayload(payload) {
 }
 
 document.addEventListener("click", async e => {
+  // A delegação mantém as ações após cada reconstrução de tela feita por shell().
   const a = e.target.closest("[data-action]"); if (!a) return;
   e.preventDefault();
   const action = a.dataset.action, id = a.dataset.id;
@@ -1155,6 +1492,14 @@ document.addEventListener("click", async e => {
     if (action === "new" && state.user.role !== "supervisor") renderEditor(blankReport());
     if (action === "new-survey" && state.user.role !== "supervisor") renderSurvey(blankSurveyPayload());
     if (action === "new-client" && state.user.role === "supervisor") renderClientForm();
+    if (action === "manager-open" && state.user.role === "supervisor") {
+      let report = state.reports.find(item => item.id === id);
+      if (!report) {
+        state.reports = await api("/api/reports?full=1&limit=1000");
+        report = state.reports.find(item => item.id === id);
+      }
+      if (report) renderViewer(report); else alert("Relatório não encontrado no histórico.");
+    }
     if (action === "open") {
       const report = state.reports.find(r => r.id === id);
       state.viewingSurveyReadOnly = false;
@@ -1198,7 +1543,7 @@ document.addEventListener("click", async e => {
       renderDashboard();
     }
     if (action === "complete-survey") {
-      if(!field(state.editing,"cliente") && !field(state.editing,"empresa")) return alert("Informe a empresa/cliente.");
+      if (!validateBeforeAction(state.editing, "survey_completion")) return;
       state.editing.report.fields._stage = "rei_pendente";
       state.editing.report.fields._surveyCompletedAt = String(Date.now());
       if (!state.editing.report.fields.cliente) state.editing.report.fields.cliente = state.editing.report.fields.empresa;
@@ -1206,14 +1551,16 @@ document.addEventListener("click", async e => {
       renderDashboard();
     }
     if (action === "save-print") {
-      if(!field(state.editing,"cliente")) return alert("Informe o cliente/projeto.");
-      if (!isConcludedDeliveryStatus(state.editing.report.deliveryStatus)) return alert("Sinalize a implantação como concluída antes de gerar o PDF.");
+      if (!validateBeforeAction(state.editing, "rei_completion")) return;
       state.editing.report.fields._stage = "rei";
       const savedId = await savePayload(state.editing);
       renderViewer(state.reports.find(r => r.id === savedId));
       await printCurrentReport();
     }
-    if (action === "print" && ((state.viewingSurveyReadOnly && stage(state.viewing) === "rei_pendente") || isReadyForSupervisorEvaluation(state.viewing))) { await printCurrentReport(); }
+    if (action === "print" && ((state.viewingSurveyReadOnly && stage(state.viewing) === "rei_pendente") || isReadyForSupervisorEvaluation(state.viewing))) {
+      const phase = state.viewingSurveyReadOnly ? "survey_completion" : "rei_completion";
+      if (validateBeforeAction(state.viewing, phase)) await printCurrentReport();
+    }
     if (action === "evaluate") {
       const report = state.reports.find(r => r.id === id);
       if (state.user.role === "supervisor" && isReadyForSupervisorEvaluation(report)) renderEvaluation(report);
@@ -1224,11 +1571,32 @@ document.addEventListener("click", async e => {
       if (report) renderViewer(report);
     }
     if (action === "close-modal") $(".modal")?.remove();
-    if (action === "save-evaluation") { const r = state.reports.find(x => x.id === id); r.report.fields._supervisorName = state.user.fullName || state.user.username; r.report.fields._supervisionReviewedAt = String(Date.now()); await savePayload(r); $(".modal")?.remove(); renderViewer(state.reports.find(x => x.id === id)); }
+    if (action === "close-requirements") { $(".requirements-modal")?.remove(); goToFirstRequirement(); }
+    if (action === "go-first-requirement") goToFirstRequirement();
+    if (action === "save-evaluation") {
+      const r = state.reports.find(x => x.id === id);
+      if (!validateBeforeAction(r, "supervision_submission")) return;
+      r.report.fields._supervisorName = state.user.fullName || state.user.username;
+      r.report.fields._supervisionReviewedAt = String(Date.now());
+      await savePayload(r); $(".modal")?.remove(); renderViewer(state.reports.find(x => x.id === id));
+    }
     if (action === "clear-signature") { state.editing.report.fields[a.dataset.key] = ""; drawEditor(); }
   } catch (error) {
+    if (error.code === "required_items_missing" && error.requirements?.length) {
+      showRequiredRequirements(error.requirements);
+      return;
+    }
     alert(error.message || "Não foi possível executar esta ação.");
   }
+});
+
+document.addEventListener("change", async event => {
+  const control = event.target.closest("[data-manager-filter]");
+  if (!control || state.user?.role !== "supervisor") return;
+  const key = control.dataset.managerFilter;
+  state.managerFilters[key] = control.type === "checkbox" ? control.checked : control.value;
+  await loadSupervisorDashboard();
+  renderDashboard();
 });
 
 (async function init() {
