@@ -2,14 +2,19 @@ package br.com.dubrasil.rei
 
 import android.app.Activity
 import android.app.Instrumentation
+import android.graphics.Bitmap
+import android.graphics.Color
 import android.os.Bundle
+import android.util.Base64
 import androidx.room.Room
 import br.com.dubrasil.rei.data.ReiDatabase
 import br.com.dubrasil.rei.data.ReportEntity
 import br.com.dubrasil.rei.model.ReportData
 import br.com.dubrasil.rei.model.ReportSchema
+import br.com.dubrasil.rei.model.SchemaOverrides
 import br.com.dubrasil.rei.pdf.PdfExporter
 import java.io.ByteArrayOutputStream
+import org.json.JSONObject
 
 /** Regressão instrumentada: conclusão e impressão do levantamento não dependem da rede. */
 class OfflinePersistenceInstrumentation : Instrumentation() {
@@ -22,7 +27,8 @@ class OfflinePersistenceInstrumentation : Instrumentation() {
         val cases = listOf(
             "surveyDraftIsPersistedBeforeNavigation" to ::verifySurveyDraftPersistence,
             "completedSurveyRemainsInOfflineQueue" to ::verifyOfflinePersistence,
-            "surveyPdfIsGeneratedWithoutNetwork" to ::verifyOfflineSurveyPdf,
+            "completedSurveyPdfCanBeReprintedAfterReiStarts" to ::verifyOfflineSurveyPdf,
+            "reiFieldChangedToPhotoIsPrintedAsImage" to ::verifyReiPhotoField,
             "surveyPhotoUsesConfiguredProviderRoot" to ::verifySurveyPhotoTarget
         )
         var failures = 0
@@ -149,21 +155,81 @@ class OfflinePersistenceInstrumentation : Instrumentation() {
     }
 
     private fun verifyOfflineSurveyPdf() {
-        val report = ReportData(
-            fields = mapOf(
-                "_id" to "offline-survey",
-                "_stage" to "rei_pendente",
-                "cliente" to "Cliente Offline"
+        val (imageDataUrl, imageSize) = testImageDataUrl()
+        val changedFieldSchema = SchemaOverrides.fromJson(JSONObject("""
+            {"levantamento":[{"title":"Fluxograma inicial","fields":[{
+              "key":"fluxogramaInicial","label":"Fluxograma inicial","type":"photo",
+              "options":[],"requiredMode":"never"
+            }]}]}
+        """.trimIndent()))
+        ReportSchema.configure(changedFieldSchema)
+        try {
+            val report = ReportData(
+                fields = mapOf(
+                    "_id" to "offline-survey",
+                    "_stage" to "rei",
+                    "_surveyCompletedAt" to "123456789",
+                    "cliente" to "Cliente Offline",
+                    "fluxogramaInicial" to imageDataUrl
+                )
             )
-        )
-        check(ReportSchema.validateRequiredRequirements(report, ReportSchema.PHASE_SURVEY).isEmpty()) {
-            "O relatório de teste não atende ao esquema local do levantamento."
+            check(ReportSchema.validateRequiredRequirements(report, ReportSchema.PHASE_SURVEY).isEmpty()) {
+                "O relatório de teste não atende ao esquema local do levantamento."
+            }
+            val output = ByteArrayOutputStream()
+            PdfExporter.write(targetContext, output, report, forceSurveyReport = true)
+            val pdf = output.toByteArray()
+            check(pdf.take(4).toByteArray().decodeToString() == "%PDF" && pdf.size > imageSize) {
+                "O campo alterado de texto para foto não foi incorporado ao PDF do levantamento."
+            }
+        } finally {
+            ReportSchema.configure(SchemaOverrides.Empty)
         }
-        val output = ByteArrayOutputStream()
-        PdfExporter.write(targetContext, output, report)
-        check(output.toByteArray().take(4).toByteArray().decodeToString() == "%PDF") {
-            "O PDF do levantamento não foi produzido localmente."
+    }
+
+    private fun verifyReiPhotoField() {
+        val photoKey = "tecnico::Instalação e ambiente::Instalação do TGA"
+        val (imageDataUrl, imageSize) = testImageDataUrl()
+        val changedFieldSchema = SchemaOverrides.fromJson(JSONObject("""
+            {"rei":{"technical":[{"title":"Instalação e ambiente","items":[{
+              "key":"$photoKey","label":"Instalação do TGA","type":"photo",
+              "options":[],"requiredMode":"never"
+            }]}]}}
+        """.trimIndent()))
+        ReportSchema.configure(changedFieldSchema)
+        try {
+            val report = ReportData(fields = mapOf(
+                "_id" to "rei-photo-field",
+                "_stage" to "rei",
+                "cliente" to "Cliente Foto",
+                "consultor" to "Implantador Teste",
+                "inicio" to "2026-08-01",
+                "termino" to "2026-08-02",
+                "servicosExecutados" to "Validação do campo de foto",
+                "assinaturaAnalistaImagem" to imageDataUrl,
+                "assinaturaClienteImagem" to imageDataUrl,
+                photoKey to imageDataUrl
+            ), deliveryStatus = "Concluído")
+            val output = ByteArrayOutputStream()
+            PdfExporter.write(targetContext, output, report, forceSurveyReport = false)
+            val pdf = output.toByteArray()
+            check(pdf.take(4).toByteArray().decodeToString() == "%PDF" && pdf.size > imageSize) {
+                "O item do R.E.I. alterado para foto não foi incorporado ao PDF."
+            }
+        } finally {
+            ReportSchema.configure(SchemaOverrides.Empty)
         }
+    }
+
+    private fun testImageDataUrl(): Pair<String, Int> {
+        val bitmap = Bitmap.createBitmap(96, 96, Bitmap.Config.ARGB_8888).apply {
+            for (x in 0 until width) for (y in 0 until height) {
+                setPixel(x, y, if ((x + y) % 2 == 0) Color.BLUE else Color.CYAN)
+            }
+        }
+        val bytes = ByteArrayOutputStream().also { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }.toByteArray()
+        bitmap.recycle()
+        return "data:image/png;base64,${Base64.encodeToString(bytes, Base64.NO_WRAP)}" to bytes.size
     }
 
     private fun verifySurveyPhotoTarget() {

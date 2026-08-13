@@ -26,14 +26,15 @@ object PdfExporter {
     private const val PAGE_WIDTH = 595
     private const val PAGE_HEIGHT = 842
 
-    fun write(context: Context, uri: Uri, data: ReportData) {
+    fun write(context: Context, uri: Uri, data: ReportData, forceSurveyReport: Boolean? = null) {
         context.contentResolver.openOutputStream(uri)?.use { output ->
-            write(context, output, data)
+            write(context, output, data, forceSurveyReport)
         }
     }
 
-    fun write(context: Context, output: OutputStream, data: ReportData) {
-        val phase = if (isSurveyReport(data)) ReportSchema.PHASE_SURVEY else ReportSchema.PHASE_REI
+    fun write(context: Context, output: OutputStream, data: ReportData, forceSurveyReport: Boolean? = null) {
+        val surveyReport = forceSurveyReport ?: isSurveyReport(data)
+        val phase = if (surveyReport) ReportSchema.PHASE_SURVEY else ReportSchema.PHASE_REI
         val missing = ReportSchema.validateRequiredRequirements(data, phase)
         require(missing.isEmpty()) {
             "PDF bloqueado: ${missing.joinToString("; ") { "${it.section}: ${it.label}" }}"
@@ -41,7 +42,7 @@ object PdfExporter {
         val document = PdfDocument()
         val writer = FormWriter(document, context, data)
 
-        if (isSurveyReport(data)) {
+        if (surveyReport) {
             writeSurvey(writer, data)
             writer.finish()
             document.writeTo(output)
@@ -105,15 +106,7 @@ object PdfExporter {
             writer.groups("supervisao", ReportSchema.supervision)
         }
 
-        val customPhotos = listOf("tecnico", "estoque", "financeiro", "fiscal").flatMap { scope ->
-            ReportSchema.dynamicFields(scope).flatMap { group ->
-                group.fields.filter { it.type == "photo" }.mapNotNull { field ->
-                    val value = ReportSchema.itemValue(data, scope, group.title, field)
-                    if (value.isBlank()) null else "${group.title} • ${field.label}" to value
-                }
-            }
-        }
-        if (data.attachments.isNotEmpty() || customPhotos.isNotEmpty()) {
+        if (data.attachments.isNotEmpty()) {
             writer.section("EVIDÊNCIAS E ANEXOS", reserveAfter = 70f)
             data.attachments.forEachIndexed { index, attachment ->
                 if (attachment.mimeType.startsWith("image/")) {
@@ -122,7 +115,6 @@ object PdfExporter {
                     writer.fileReference(attachment.name)
                 }
             }
-            customPhotos.forEach { (label, uri) -> writer.evidence(label, Uri.parse(uri)) }
         }
 
         writer.finish()
@@ -302,15 +294,31 @@ object PdfExporter {
             titles.forEach { title ->
                 val group = groups.firstOrNull { it.title.equals(title, ignoreCase = true) }
                 val dynamic = dynamicGroups.firstOrNull { it.title.equals(title, ignoreCase = true) }
+                val items = (group?.items.orEmpty() + dynamic?.fields.orEmpty())
+                    .distinctBy { ReportSchema.key(scope, title, it) }
+                val checklistItems = items.filter { it.type.equals("checkbox", ignoreCase = true) }
+                val photoItems = items.filter { it.type.equals("photo", ignoreCase = true) }
+                val paragraphItems = items.filter { it.type.equals("textarea", ignoreCase = true) }
+                val compactItems = items.filterNot {
+                    it.type.equals("checkbox", ignoreCase = true) ||
+                        it.type.equals("photo", ignoreCase = true) ||
+                        it.type.equals("textarea", ignoreCase = true)
+                }
                 subsection(title)
-                if (!group?.items.isNullOrEmpty()) {
-                    checklist(group!!.items, columns = 2) { ReportSchema.itemKeys(scope, title, it) }
+                if (checklistItems.isNotEmpty()) {
+                    checklist(checklistItems, columns = 2) { ReportSchema.itemKeys(scope, title, it) }
                 }
-                val fields = dynamic?.fields.orEmpty().map { field ->
-                    val value = ReportSchema.itemValue(data, scope, title, field)
-                    field.label to if (field.type == "photo" && value.isNotBlank()) "Foto anexada" else value
+                if (compactItems.isNotEmpty()) {
+                    infoTable(compactItems.map { field ->
+                        field.label to ReportSchema.itemValue(data, scope, title, field)
+                    })
                 }
-                if (fields.isNotEmpty()) infoTable(fields)
+                paragraphItems.forEach { field ->
+                    paragraphBox(field.label, ReportSchema.itemValue(data, scope, title, field), 54f)
+                }
+                photoItems.forEach { field ->
+                    photoBox(field.label, ReportSchema.itemValue(data, scope, title, field))
+                }
                 space(4f)
             }
         }

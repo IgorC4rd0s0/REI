@@ -421,7 +421,7 @@ private fun ReiApp(
         currentUser = null
         showDashboard = false
     }
-    val exportAndSharePdf = { fileName: String, exportReport: ReportData, archiveAfterShare: Boolean ->
+    val exportAndSharePdf = { fileName: String, exportReport: ReportData, archiveAfterShare: Boolean, surveyReport: Boolean ->
         runCatching {
             val directory = File(context.filesDir, "shared_reports").apply { mkdirs() }
             directory.listFiles()?.forEach { oldFile ->
@@ -430,7 +430,7 @@ private fun ReiApp(
                 }
             }
             val file = File(directory, fileName)
-            file.outputStream().use { output -> PdfExporter.write(context, output, exportReport) }
+            file.outputStream().use { output -> PdfExporter.write(context, output, exportReport, surveyReport) }
             val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
             val shareIntent = Intent(Intent.ACTION_SEND).apply {
                 type = "application/pdf"
@@ -503,7 +503,7 @@ private fun ReiApp(
                         surveyReportId = null
                         showDashboard = true
                         Toast.makeText(context, "Levantamento salvo no dispositivo e liberado para R.E.I.", Toast.LENGTH_LONG).show()
-                        exportAndSharePdf(surveyPdfFileName(completed.client), completed.report, false)
+                        exportAndSharePdf(surveyPdfFileName(completed.client), completed.report, false, true)
                     }
                     .onFailure { error ->
                         Toast.makeText(context, "Não foi possível concluir o levantamento: ${error.message.orEmpty()}", Toast.LENGTH_LONG).show()
@@ -537,9 +537,9 @@ private fun ReiApp(
                 vm.saveSupervisorEvaluation(viewedReport.id, authenticatedUser.username, score, rating, supervisionChecks)
                 Toast.makeText(context, "Avaliação da supervisão salva", Toast.LENGTH_LONG).show()
             }) else null,
-            onReprint = if ((viewingSurveyReadOnly && viewedReport.stage() == "rei_pendente") || (!viewingSurveyReadOnly && viewedReport.isReadyForSupervisorEvaluation())) ({
+            onReprint = if ((viewingSurveyReadOnly && viewedReport.hasCompletedSurvey()) || (!viewingSurveyReadOnly && viewedReport.isReadyForSupervisorEvaluation())) ({
                 val fileName = if (viewingSurveyReadOnly) surveyPdfFileName(viewedReport.client) else reportPdfFileName(viewedReport.client)
-                exportAndSharePdf(fileName, viewedReport.report, false)
+                exportAndSharePdf(fileName, viewedReport.report, false, viewingSurveyReadOnly)
             }) else null
         )
         return
@@ -579,7 +579,7 @@ private fun ReiApp(
                 }
             },
             onOpenSurvey = {
-                if (it.stage() == "rei_pendente") {
+                if (it.hasCompletedSurvey()) {
                     viewingSurveyReadOnly = true
                     viewingReportId = it.id
                 } else {
@@ -654,7 +654,8 @@ private fun ReiApp(
                         exportAndSharePdf(
                             reportPdfFileName(report.field("cliente")),
                             report.copy(fields = report.fields + ("_requiredValidationSnapshot" to snapshot)),
-                            true
+                            true,
+                            false
                         )
                     }
                 }
@@ -839,20 +840,16 @@ private fun LoginScreen(onAuthenticated: (AuthUser) -> Unit) {
                 Image(
                     painter = painterResource(appLogoResource()),
                     contentDescription = "DuBrasil Soluções",
-                    modifier = Modifier.size(128.dp),
+                    modifier = Modifier.size(108.dp),
                     contentScale = ContentScale.Fit
                 )
-                Spacer(Modifier.height(22.dp))
-                Box(Modifier.size(50.dp).clip(CircleShape).background(MaterialTheme.colorScheme.surfaceVariant), contentAlignment = Alignment.Center) {
-                    Icon(Icons.Outlined.Lock, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(27.dp))
-                }
-                Spacer(Modifier.height(13.dp))
+                Spacer(Modifier.height(18.dp))
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Spacer(Modifier.width(42.dp))
-                    Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
+                    Column(Modifier.weight(1f), horizontalAlignment = Alignment.Start) {
                         Text("Acesso ao R.E.I.", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
                         Text("Entre com o usuário cadastrado pelo supervisor.", style = MaterialTheme.typography.bodySmall, color = appMutedColor())
                     }
+                    Spacer(Modifier.width(10.dp))
                     IconButton(
                         onClick = { showConnectionSettings = !showConnectionSettings },
                         modifier = Modifier.size(42.dp).clip(CircleShape).background(MaterialTheme.colorScheme.surfaceVariant)
@@ -967,19 +964,22 @@ private fun DashboardScreen(
         draft.checks.isNotEmpty() || draft.attachments.isNotEmpty() || draft.deliveryStatus.isNotBlank()
     val evaluations = history.filter { hasSupervisorEvaluation(it.report) }
     val averageScore = evaluations.mapNotNull { supervisionScore(it.report) }.takeIf { it.isNotEmpty() }?.average()
-    val lastDate = history.maxByOrNull { it.completedAt }?.let {
-        SimpleDateFormat("dd/MM/yyyy", Locale("pt", "BR")).format(Date(it.completedAt))
-    } ?: "—"
     var dashboardArea by rememberSaveable(user.username, "dashboardArea") { mutableStateOf("home") }
     var selectedDashboardFilter by rememberSaveable(user.username) { mutableStateOf("levantamentos") }
     val scopedHistory = if (user.isSupervisor) history else history.filter { it.isAssignedTo(user.username) }
     val surveyPending = scopedHistory.filter { it.stage() == "levantamento_pendente" }
     val reiPending = scopedHistory.filter { it.stage() == "rei_pendente" }
-    val surveyCompleted = reiPending
+    val surveyCompleted = scopedHistory.filter { it.hasCompletedSurvey() }
     val allSurveys = surveyPending + surveyCompleted
     val reiReports = scopedHistory.filterNot { it.isSurveyStage() }
     val inProgress = reiReports.filterNot { it.isReadyForSupervisorEvaluation() }
     val concluded = reiReports.filter { it.isReadyForSupervisorEvaluation() }
+    val lastSurveyDate = surveyCompleted.maxByOrNull { it.surveyCompletedAt() }?.let {
+        dashboardDate(it.surveyCompletedAt())
+    } ?: "—"
+    val lastReiDeliveryDate = concluded.maxByOrNull { it.reiDeliveredAt() }?.let {
+        dashboardDate(it.reiDeliveredAt())
+    } ?: "—"
     val dashboardGroups = if (dashboardArea == "levantamentos") {
         listOf(
             DashboardGroup("levantamentos", "Levantamentos pendentes", surveyPending.size, if (user.isSupervisor) "Clientes aguardando levantamento" else "Disponíveis para preencher", "file", surveyPending, "Nenhum levantamento pendente."),
@@ -1070,34 +1070,33 @@ private fun DashboardScreen(
                 Spacer(Modifier.height(18.dp))
                 Text("Resumo rápido", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = appTextColor())
                 Spacer(Modifier.height(10.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    MetricCard(
-                        modifier = Modifier.weight(1f),
-                        icon = { Icon(Icons.Outlined.BusinessCenter, null, tint = MaterialTheme.colorScheme.primary) },
-                        value = (reiPending.size + reiReports.size).toString(),
-                        label = "Implantações"
-                    )
-                    MetricCard(
-                        modifier = Modifier.weight(1f),
-                        icon = { Icon(Icons.Outlined.Description, null, tint = MaterialTheme.colorScheme.primary) },
-                        value = allSurveys.size.toString(),
-                        label = "Levantamentos"
-                    )
-                }
-                Spacer(Modifier.height(12.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    MetricCard(
-                        modifier = Modifier.weight(1f),
-                        icon = { Icon(Icons.Rounded.CheckCircle, null, tint = Green) },
-                        value = evaluations.size.toString(),
-                        label = "Avaliações"
-                    )
-                    MetricCard(
-                        modifier = Modifier.weight(1f),
-                        icon = { Icon(Icons.Outlined.CalendarMonth, null, tint = MaterialTheme.colorScheme.primary) },
-                        value = lastDate,
-                        label = "Última entrega"
-                    )
+                val summaryMetrics = listOf(
+                    Triple("briefcase", (reiPending.size + reiReports.size).toString(), "Implantações"),
+                    Triple("file", allSurveys.size.toString(), "Levantamentos"),
+                    Triple("evaluation", evaluations.size.toString(), "Avaliações"),
+                    Triple("calendar", lastSurveyDate, "Último levantamento"),
+                    Triple("calendar", lastReiDeliveryDate, "Última entrega do R.E.I.")
+                )
+                BoxWithConstraints(Modifier.fillMaxWidth()) {
+                    if (maxWidth >= 900.dp) {
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            summaryMetrics.forEach { (icon, value, label) ->
+                                DashboardMetricCard(Modifier.weight(1f), icon, value, label)
+                            }
+                        }
+                    } else {
+                        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                            summaryMetrics.take(4).chunked(2).forEach { metricsRow ->
+                                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                    metricsRow.forEach { (icon, value, label) ->
+                                        DashboardMetricCard(Modifier.weight(1f), icon, value, label)
+                                    }
+                                }
+                            }
+                            val (icon, value, label) = summaryMetrics.last()
+                            DashboardMetricCard(Modifier.fillMaxWidth(), icon, value, label)
+                        }
+                    }
                 }
                 Spacer(Modifier.height(18.dp))
                 Text("Gráficos separados", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = appTextColor())
@@ -1262,14 +1261,14 @@ private fun DashboardScreen(
                     }
                     Spacer(Modifier.width(12.dp))
                     Column {
-                        Text(if (dashboardArea == "levantamentos") "Último levantamento" else "Última implantação", style = MaterialTheme.typography.bodySmall, color = appMutedColor())
+                        Text(if (dashboardArea == "levantamentos") "Último levantamento" else "Última entrega do R.E.I.", style = MaterialTheme.typography.bodySmall, color = appMutedColor())
                         Text(
                             if (dashboardArea == "levantamentos") {
                                 surveyCompleted.maxByOrNull { it.report.field("_surveyCompletedAt").toLongOrNull() ?: it.completedAt }?.let {
                                     val completedAt = it.report.field("_surveyCompletedAt").toLongOrNull() ?: it.completedAt
                                     SimpleDateFormat("dd/MM/yyyy", Locale("pt", "BR")).format(Date(completedAt))
                                 } ?: "—"
-                            } else lastDate,
+                            } else lastReiDeliveryDate,
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold
                         )
@@ -1298,7 +1297,7 @@ private fun DashboardScreen(
                 items = activeDashboardGroup.items,
                 emptyText = activeDashboardGroup.emptyText,
                 onOpenReport = { item ->
-                    if (dashboardArea == "levantamentos" && item.stage() == "rei_pendente") onOpenSurvey(item)
+                    if (dashboardArea == "levantamentos" && item.hasCompletedSurvey()) onOpenSurvey(item)
                     else if (!user.isSupervisor && item.stage() == "levantamento_pendente") onOpenSurvey(item)
                     else onOpenReport(item)
                 }
@@ -2486,6 +2485,22 @@ private fun ImplementationSummary.isReadyForSupervisorEvaluation(): Boolean =
 private fun ImplementationSummary.stage(): String =
     report.field("_stage").ifBlank { "rei" }
 
+private fun ImplementationSummary.hasCompletedSurvey(): Boolean =
+    report.field("_surveyCompletedAt").isNotBlank()
+
+private fun ImplementationSummary.surveyCompletedAt(): Long =
+    report.field("_surveyCompletedAt").toLongOrNull() ?: completedAt
+
+private fun ImplementationSummary.reiDeliveredAt(): Long =
+    report.field("termino").toReportDate()
+        ?.atStartOfDay(ZoneId.systemDefault())
+        ?.toInstant()
+        ?.toEpochMilli()
+        ?: completedAt
+
+private fun dashboardDate(timestamp: Long): String =
+    SimpleDateFormat("dd/MM/yyyy", Locale("pt", "BR")).format(Date(timestamp))
+
 private fun ImplementationSummary.isSurveyStage(): Boolean =
     stage() in setOf("levantamento_pendente", "rei_pendente")
 
@@ -2815,14 +2830,10 @@ private fun ReportViewerScreen(
                     .filter { ReportSchema.isChecked(data, "dados", "modulos", it) }
                     .map { it.label }
             )
-            ViewerChecklistScope("Preenchimento técnico", "tecnico", ReportSchema.technical, data)
-            ViewerDynamicFields("Campos técnicos personalizados", "tecnico", data)
-            ViewerChecklistScope("Módulo Estoque", "estoque", ReportSchema.stock, data)
-            ViewerDynamicFields("Campos de estoque personalizados", "estoque", data)
-            ViewerChecklistScope("Módulo Financeiro", "financeiro", ReportSchema.finance, data)
-            ViewerDynamicFields("Campos financeiros personalizados", "financeiro", data)
-            ViewerChecklistScope("Fiscal e relatórios", "fiscal", ReportSchema.fiscalReports, data)
-            ViewerDynamicFields("Campos fiscais personalizados", "fiscal", data)
+            ViewerChecklistScope("tecnico", ReportSchema.technical, data)
+            ViewerChecklistScope("estoque", ReportSchema.stock, data)
+            ViewerChecklistScope("financeiro", ReportSchema.finance, data)
+            ViewerChecklistScope("fiscal", ReportSchema.fiscalReports, data)
             ViewerSection("Entrega") {
                 ViewerValue("Serviços executados", data.field("servicosExecutados"))
                 ViewerValue("Posicionamento", data.deliveryStatus)
@@ -3033,13 +3044,61 @@ private fun ViewerValue(label: String, value: String, divider: Boolean = true) {
 }
 
 @Composable
-private fun ViewerChecklistScope(title: String, scope: String, groups: List<ChecklistGroup>, data: ReportData) {
-    val selected = groups.flatMap { group ->
-        group.items
-            .filter { ReportSchema.isChecked(data, scope, group.title, it) }
+private fun ViewerChecklistScope(scope: String, groups: List<ChecklistGroup>, data: ReportData) {
+    val dynamicGroups = ReportSchema.dynamicFields(scope)
+    val groupTitles = (groups.map { it.title } + dynamicGroups.map { it.title }).distinct()
+
+    groupTitles.forEach { title ->
+        val standardGroup = groups.firstOrNull { it.title == title }
+        val dynamicGroup = dynamicGroups.firstOrNull { it.title == title }
+        val groupTitle = standardGroup?.title ?: dynamicGroup?.title ?: title
+        val standardItems = standardGroup?.items.orEmpty()
+        val dynamicItems = dynamicGroup?.fields.orEmpty()
+        val selected = standardItems
+            .filter { it.type == "checkbox" && ReportSchema.isChecked(data, scope, groupTitle, it) }
             .map { it.label }
+        val values = (standardItems.filter { it.type != "checkbox" } + dynamicItems)
+            .distinctBy { ReportSchema.key(scope, groupTitle, it) }
+            .mapNotNull { item ->
+                ReportSchema.itemValue(data, scope, groupTitle, item)
+                    .takeIf { it.isNotBlank() }
+                    ?.let { value -> item to value }
+            }
+
+        if (selected.isNotEmpty() || values.isNotEmpty()) {
+            ViewerSection(groupTitle) {
+                selected.forEach { item ->
+                    Row(Modifier.padding(vertical = 5.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Rounded.CheckCircle, null, Modifier.size(20.dp), tint = Green)
+                        Spacer(Modifier.width(9.dp))
+                        Text(item, style = MaterialTheme.typography.bodyMedium, color = appTextColor())
+                    }
+                }
+                if (selected.isNotEmpty() && values.isNotEmpty()) Spacer(Modifier.height(8.dp))
+                values.forEach { (item, value) ->
+                    if (item.type == "photo") ViewerImage(item.label, value)
+                    else ViewerFieldCard(item.label, value)
+                }
+            }
+        }
     }
-    ViewerSelectedChecks(title, selected)
+}
+
+@Composable
+private fun DashboardMetricCard(modifier: Modifier, icon: String, value: String, label: String) {
+    MetricCard(
+        modifier = modifier,
+        icon = {
+            when (icon) {
+                "briefcase" -> Icon(Icons.Outlined.BusinessCenter, null, tint = MaterialTheme.colorScheme.primary)
+                "file" -> Icon(Icons.Outlined.Description, null, tint = MaterialTheme.colorScheme.primary)
+                "evaluation" -> Icon(Icons.Rounded.CheckCircle, null, tint = Green)
+                else -> Icon(Icons.Outlined.CalendarMonth, null, tint = MaterialTheme.colorScheme.primary)
+            }
+        },
+        value = value,
+        label = label
+    )
 }
 
 @Composable
@@ -3134,6 +3193,22 @@ private fun ReiTopBar(
             }
             Spacer(Modifier.width(7.dp))
             AccountSettingsButton(onLogout, onChangePassword, themeMode, onThemeModeChange)
+        }
+    }
+}
+
+@Composable
+private fun ViewerFieldCard(label: String, value: String) {
+    Surface(
+        modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp),
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        border = androidx.compose.foundation.BorderStroke(1.dp, appBorderColor())
+    ) {
+        Column(Modifier.padding(horizontal = 14.dp, vertical = 13.dp)) {
+            Text(label, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold, color = appMutedColor())
+            Spacer(Modifier.height(7.dp))
+            Text(value.ifBlank { "Não informado" }, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold, color = appTextColor())
         }
     }
 }
@@ -3534,36 +3609,16 @@ private fun SurveyCompletedViewer(data: ReportData) {
         }
         if (informedFields.isNotEmpty()) {
             ViewerSection(section.title) {
-                informedFields.forEachIndexed { index, field ->
+                informedFields.forEach { field ->
                     val value = data.field(field.key).ifBlank {
                         if (field.key == "empresa") data.field("cliente") else ""
                     }
                     if (field.type == SurveyFieldType.Photo) {
                         ViewerImage(field.label, value)
                     } else {
-                        ViewerValue(field.label, value, divider = index < informedFields.lastIndex)
+                        ViewerFieldCard(field.label, value)
                     }
                 }
-            }
-        }
-    }
-}
-
-@Composable
-private fun ViewerDynamicFields(title: String, scope: String, data: ReportData) {
-    val values = ReportSchema.dynamicFields(scope).flatMap { group ->
-        group.fields.mapNotNull { field ->
-            val value = ReportSchema.itemValue(data, scope, group.title, field)
-            if (value.isBlank()) null else Triple(group.title, field, value)
-        }
-    }
-    if (values.isEmpty()) return
-    ViewerSection(title) {
-        values.forEachIndexed { index, (group, field, value) ->
-            if (field.type == "photo") {
-                ViewerImage("$group • ${field.label}", value)
-            } else {
-                ViewerValue("$group • ${field.label}", value, divider = index < values.lastIndex)
             }
         }
     }

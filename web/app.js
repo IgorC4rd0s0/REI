@@ -431,9 +431,14 @@ function blankReport() {
 }
 function field(report, key) { return report?.report?.fields?.[key] || ""; }
 function stage(report) { return field(report, "_stage") || "rei"; }
+function hasCompletedSurvey(report) { return Boolean(String(field(report, "_surveyCompletedAt") || "").trim()); }
 function surveyCompletedAt(report) { return Number(field(report, "_surveyCompletedAt")) || report?.completed_at || report?.completedAt || 0; }
-function reportPdfTitle(report) {
-  const prefix = ["levantamento_pendente", "rei_pendente"].includes(stage(report)) ? "Levantamento de Dados" : "Relatorio de Entrega";
+function reiDeliveredAt(report) {
+  const endDate = reportDate(field(report, "termino"));
+  return endDate ? endDate.getTime() : Number(report?.completed_at || report?.completedAt || 0);
+}
+function reportPdfTitle(report, surveyReport = false) {
+  const prefix = surveyReport || ["levantamento_pendente", "rei_pendente"].includes(stage(report)) ? "Levantamento de Dados" : "Relatorio de Entrega";
   const client = String(report?.client || field(report, "cliente") || "Cliente")
     .replace(/[\\/:*?"<>|\r\n]+/g, " ")
     .replace(/\s+/g, " ")
@@ -652,8 +657,10 @@ function renderDashboardHome() {
   // A página inicial é deliberadamente objetiva: operações, resumo e gráficos.
   const reports = state.reports;
   const scoped = reportScope();
-  const surveys = scoped.filter(r => ["levantamento_pendente", "rei_pendente"].includes(stage(r)));
+  const surveys = scoped.filter(r => stage(r) === "levantamento_pendente" || hasCompletedSurvey(r));
   const implementations = scoped.filter(r => stage(r) !== "levantamento_pendente");
+  const completedSurveys = scoped.filter(hasCompletedSurvey).sort((a, b) => surveyCompletedAt(b) - surveyCompletedAt(a));
+  const deliveredReports = implementations.filter(isReadyForSupervisorEvaluation).sort((a, b) => reiDeliveredAt(b) - reiDeliveredAt(a));
   const roleTitle = state.user?.role === "supervisor" ? "Área do supervisor" : "Área do implantador";
   shell(`<section class="hero hub-hero">
       <h1>${roleTitle}</h1>
@@ -674,11 +681,12 @@ function renderDashboardHome() {
       </button>
     </section>
     <div class="section-title"><h2>Resumo rápido</h2></div>
-    <section class="grid metrics">
+    <section class="grid metrics home-summary-metrics">
       ${metric("Implantações", implementations.length, "briefcase")}
       ${metric("Levantamentos", surveys.length, "file")}
       ${metric("Avaliações", reports.filter(hasEvaluation).length, "star")}
-      ${metric("Última entrega", implementations[0] ? fmtDate(implementations[0].completed_at) : "-", "calendar")}
+      ${metric("Último levantamento", completedSurveys[0] ? fmtDate(surveyCompletedAt(completedSurveys[0])) : "-", "calendar")}
+      ${metric("Última entrega do R.E.I.", deliveredReports[0] ? fmtDate(reiDeliveredAt(deliveredReports[0])) : "-", "calendar")}
     </section>
     <div class="section-title"><h2>Gráficos separados</h2></div>
     <section class="grid charts-grid">
@@ -691,12 +699,13 @@ function renderDashboardArea() {
   const reports = reportScope();
   const isSurveyArea = state.dashboardArea === "levantamentos";
   const surveys = reports.filter(r => stage(r) === "levantamento_pendente");
-  const completedSurveys = reports.filter(r => stage(r) === "rei_pendente").sort((a, b) => surveyCompletedAt(b) - surveyCompletedAt(a));
+  const completedSurveys = reports.filter(hasCompletedSurvey).sort((a, b) => surveyCompletedAt(b) - surveyCompletedAt(a));
   const allSurveys = surveys.concat(completedSurveys);
   const reiPending = reports.filter(r => stage(r) === "rei_pendente");
   const reiReports = reports.filter(r => !["levantamento_pendente", "rei_pendente"].includes(stage(r)));
   const inProgress = reiReports.filter(r => !isReadyForSupervisorEvaluation(r));
   const concluded = reiReports.filter(isReadyForSupervisorEvaluation);
+  const deliveredReports = [...concluded].sort((a, b) => reiDeliveredAt(b) - reiDeliveredAt(a));
   const evaluations = reiReports.filter(hasEvaluation);
   const avgDays = concluded.map(implementationDurationDays).filter(v => v !== null);
   const avgScore = evaluations.map(score).filter(v => v !== null);
@@ -721,7 +730,7 @@ function renderDashboardArea() {
     <section class="grid metrics">
       ${isSurveyArea
         ? `${metric("Levantamentos pendentes", surveys.length, "file")}${metric("Levantamentos concluídos", completedSurveys.length, "calendar")}${metric("Último levantamento", completedSurveys[0] ? fmtDate(surveyCompletedAt(completedSurveys[0])) : "-", "calendar")}`
-        : `${metric("Implantações", reiPending.length + reiReports.length, "briefcase")}${metric("Média de dias gastos", avgDays.length ? `${(avgDays.reduce((a,b)=>a+b,0)/avgDays.length).toFixed(1)} dias` : "-", "timer")}${metric("Nota média", avgScore.length ? `${(avgScore.reduce((a,b)=>a+b,0)/avgScore.length).toFixed(1)}/10` : "-", "star")}${metric("Última entrega", reiReports[0] ? fmtDate(reiReports[0].completed_at) : "-", "calendar")}`}
+        : `${metric("Implantações", reiPending.length + reiReports.length, "briefcase")}${metric("Média de dias gastos", avgDays.length ? `${(avgDays.reduce((a,b)=>a+b,0)/avgDays.length).toFixed(1)} dias` : "-", "timer")}${metric("Nota média", avgScore.length ? `${(avgScore.reduce((a,b)=>a+b,0)/avgScore.length).toFixed(1)}/10` : "-", "star")}${metric("Última entrega do R.E.I.", deliveredReports[0] ? fmtDate(reiDeliveredAt(deliveredReports[0])) : "-", "calendar")}`}
     </section>
     <div class="section-title"><h2>Dashboard e informações ${isSurveyArea ? "dos levantamentos" : "das implantações"}</h2></div>
     <section class="grid workflow-cards">${groups.map(group => workflowCard(group, group.key === activeGroup.key)).join("")}</section>
@@ -1248,7 +1257,7 @@ function renderViewer(r, options = {}) {
   shell(`<section class="hero viewer has-top-action"><button class="btn secondary page-back" data-action="dashboard">Voltar</button><h1>${esc(r.client || f.cliente)}</h1><p>${fmtDate(r.completed_at)} · ${esc(r.consultant || f.consultor || "")}</p></section>
     <section class="card viewer">${dl([["Cliente / Projeto",f.cliente],["Implantador responsável",assignedName(r)],["Contato",f.contato],["Tel/Cel",f.telefone],["E-mail",f.email],["CNPJ",f.cnpj],["Consultor",f.consultor],["Início",f.inicio],["Término",f.termino],["Status",r.report.deliveryStatus],["Serviços executados",f.servicosExecutados],["Pendências",f.pendencias]])}</section>
     ${hasEvaluation(r)?supervisionEvaluationCard(r, evaluationScore, checks):""}
-    ${state.viewingSurveyReadOnly ? surveyViewerHtml(f) : `<section class="card"><h2>Dados preenchidos no R.E.I.</h2>${selected(S.technical,"tecnico",checks,f)}${selected(S.stock,"estoque",checks,f)}${selected(S.finance,"financeiro",checks,f)}${selected(S.fiscal,"fiscal",checks,f)}</section>`}
+    ${state.viewingSurveyReadOnly ? surveyViewerHtml(f) : selectedReportData(checks, f)}
     ${surveyLike ? printSurveyHtml(r) : printReportHtml(r)}
     ${actions ? `<div class="footer-actions no-print">${actions}</div>` : ""}`);
 }
@@ -1263,6 +1272,21 @@ function surveyViewerHtml(fields) {
   }).join("");
 }
 function dl(items){return `<dl>${items.map(([k,v])=>`<dt>${esc(k)}</dt><dd>${esc(v||"Não informado")}</dd>`).join("")}</dl>`}
+function selectedReportData(checks, fields) {
+  const topics = [
+    selectedModules(checks),
+    selected(S.technical, "tecnico", checks, fields),
+    selected(S.stock, "estoque", checks, fields),
+    selected(S.finance, "financeiro", checks, fields),
+    selected(S.fiscal, "fiscal", checks, fields)
+  ].join("");
+  return `<section class="card filled-report-card"><h2>Dados preenchidos no R.E.I.</h2>${topics ? `<div class="viewer-topic-grid">${topics}</div>` : `<p class="muted viewer-empty">Nenhum dado informado.</p>`}</section>`;
+}
+function selectedModules(checks) {
+  const modules = S.modules.filter(item => schemaItemKeys("dados", "modulos", item).some(key => checks.has(key)))
+    .map(item => `<span class="pill">${esc(schemaItemLabel(item))}</span>`).join("");
+  return modules ? `<article class="viewer-topic-card viewer-modules-card"><h3>Módulos contratados</h3><div class="viewer-topic-items">${modules}</div></article>` : "";
+}
 function selected(groups, scope, checks, fields = {}) {
   const content = groups.map(([g,items]) => {
     const marked = items.filter(i => schemaItemType(i) === "checkbox" && schemaItemKeys(scope,g,i).some(key => checks.has(key))).map(i => `<span class="pill">${esc(schemaItemLabel(i))}</span>`).join(" ");
@@ -1271,9 +1295,9 @@ function selected(groups, scope, checks, fields = {}) {
       if (!value) return "";
       return `<div class="dynamic-value"><small>${esc(schemaItemLabel(i))}</small>${schemaItemType(i) === "photo" ? `<img src="${esc(value)}" alt="${esc(schemaItemLabel(i))}">` : `<b>${esc(value)}</b>`}</div>`;
     }).filter(Boolean).join("");
-    return marked || values ? `<div class="viewer-dynamic-group"><h3>${esc(g)}</h3>${marked}<div class="dynamic-values">${values}</div></div>` : "";
+    return marked || values ? `<article class="viewer-topic-card"><h3>${esc(g)}</h3>${marked ? `<div class="viewer-topic-items">${marked}</div>` : ""}${values ? `<div class="dynamic-values">${values}</div>` : ""}</article>` : "";
   }).filter(Boolean).join("");
-  return content || "<p class='muted'>Nenhum dado informado.</p>";
+  return content;
 }
 function selectedCards(groups, scope, checks) {
   const items = groups.flatMap(([g, list]) => list.filter(i => schemaItemType(i) === "checkbox" && schemaItemKeys(scope,g,i).some(key => checks.has(key))).map(i => [g, schemaItemLabel(i)]));
@@ -1358,12 +1382,13 @@ function printSurveyHtml(r) {
   </article>`;
 }
 function pSurveyFields(fields, f) {
-  const choices = fields.filter(([, , type]) => type === "choice");
-  const photos = fields.filter(([, , type]) => type === "photo");
-  const texts = fields.filter(([, , type]) => type !== "choice" && type !== "photo");
-  return `${choices.length ? `<div class="print-info">${choices.map(([key,label]) => `<div><small>${esc(label).toUpperCase()}</small><b>${esc(f[key] || "—")}</b></div>`).join("")}</div>` : ""}
-    ${photos.map(([key,label]) => `<div class="print-photo"><small>${esc(label).toUpperCase()}</small>${f[key] ? `<img src="${esc(f[key])}" alt="${esc(label)}">` : `<b>—</b>`}</div>`).join("")}
-    ${texts.map(([key,label,type]) => type === "textarea" ? pParagraph(label, f[key]) : pInfoTable([[label, f[key]]])).join("")}`;
+  const typedFields = fields.map(item => ({ item, definition: surveyDefinition(item) }));
+  const choices = typedFields.filter(({ definition }) => definition.type === "choice");
+  const photos = typedFields.filter(({ definition }) => definition.type === "photo");
+  const texts = typedFields.filter(({ definition }) => !["choice", "photo"].includes(definition.type));
+  return `${choices.length ? `<div class="print-info">${choices.map(({ definition }) => `<div><small>${esc(definition.label).toUpperCase()}</small><b>${esc(f[definition.key] || "—")}</b></div>`).join("")}</div>` : ""}
+    ${photos.map(({ definition }) => `<div class="print-photo"><small>${esc(definition.label).toUpperCase()}</small>${f[definition.key] ? imageTag(f[definition.key], definition.label) : `<b>—</b>`}</div>`).join("")}
+    ${texts.map(({ definition }) => definition.type === "textarea" ? pParagraph(definition.label, f[definition.key]) : pInfoTable([[definition.label, f[definition.key]]])).join("")}`;
 }
 function formatSurveyDateTime(value) {
   if (!value) return "";
@@ -1387,7 +1412,7 @@ function pGroups(scope, groups, checks, fields = {}) {
     });
     const photos = typed.filter(item => schemaItemType(item) === "photo").map(item => {
       const value = schemaItemKeys(scope,group,item).map(key => fields[key]).find(Boolean);
-      return value ? `<figure><figcaption>${esc(schemaItemLabel(item))}</figcaption><img src="${esc(value)}" alt="${esc(schemaItemLabel(item))}"></figure>` : "";
+      return value ? `<figure><figcaption>${esc(schemaItemLabel(item))}</figcaption>${imageTag(value, schemaItemLabel(item))}</figure>` : "";
     }).filter(Boolean).join("");
     return `<h3 class="print-subsection">${esc(group).toUpperCase()}</h3>${checklist.length ? pChecklist(checklist, item => schemaItemKeys(scope, group, item), checks, 2) : ""}${typedValues.length ? pInfoTable(typedValues) : ""}${photos ? `<div class="print-attachments">${photos}</div>` : ""}`;
   }).join("");
@@ -1430,7 +1455,7 @@ function waitForPrintImages() {
 async function printCurrentReport() {
   // Aguarda imagens e assinaturas antes de abrir o diálogo nativo de impressão.
   const previousTitle = document.title;
-  document.title = reportPdfTitle(state.viewing);
+  document.title = reportPdfTitle(state.viewing, state.viewingSurveyReadOnly);
   await waitForPrintImages();
   const restoreTitle = () => {
     document.title = previousTitle;
@@ -1526,7 +1551,7 @@ document.addEventListener("click", async e => {
     }
     if (action === "open-survey-completed") {
       const report = state.reports.find(r => r.id === id);
-      if (report && stage(report) === "rei_pendente") renderViewer(report, { surveyReadOnly: true });
+      if (report && hasCompletedSurvey(report)) renderViewer(report, { surveyReadOnly: true });
     }
     if (action === "dashboard-filter") { state.dashboardFilter = a.dataset.filter; renderDashboard(); }
     if (action === "edit-client" && state.user.role === "supervisor") renderClientForm(state.reports.find(r => r.id === id));
@@ -1574,7 +1599,7 @@ document.addEventListener("click", async e => {
       renderViewer(state.reports.find(r => r.id === savedId));
       await printCurrentReport();
     }
-    if (action === "print" && ((state.viewingSurveyReadOnly && stage(state.viewing) === "rei_pendente") || isReadyForSupervisorEvaluation(state.viewing))) {
+    if (action === "print" && ((state.viewingSurveyReadOnly && hasCompletedSurvey(state.viewing)) || isReadyForSupervisorEvaluation(state.viewing))) {
       const phase = state.viewingSurveyReadOnly ? "survey_completion" : "rei_completion";
       if (validateBeforeAction(state.viewing, phase)) await printCurrentReport();
     }
