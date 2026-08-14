@@ -25,14 +25,15 @@ enum class ReiThemeMode(val value: String, val label: String) {
 }
 
 private val ReiLightColors = lightColorScheme(
-    primary = Color(0xFF263A7A),
+    primary = Color(0xFF0B63C9),
     onPrimary = Color.White,
-    primaryContainer = Color(0xFFDDE3FF),
-    secondary = Color(0xFF5AAE45),
-    background = Color(0xFFF4F6FA),
+    primaryContainer = Color(0xFFE8F1FC),
+    secondary = Color(0xFF00A875),
+    background = Color(0xFFF5F7FB),
     surface = Color.White,
-    surfaceVariant = Color(0xFFEFF1F7),
-    outline = Color(0xFFD7DBE5)
+    surfaceVariant = Color(0xFFF4F7FB),
+    outline = Color(0xFFDCE3ED),
+    outlineVariant = Color(0xFFE7EBF2)
 )
 
 private val ReiDarkColors = darkColorScheme(
@@ -65,8 +66,8 @@ private val ReiTypography = Typography(
 
 private val ReiShapes = Shapes(
     small = androidx.compose.foundation.shape.RoundedCornerShape(10.dp),
-    medium = androidx.compose.foundation.shape.RoundedCornerShape(16.dp),
-    large = androidx.compose.foundation.shape.RoundedCornerShape(24.dp)
+    medium = androidx.compose.foundation.shape.RoundedCornerShape(14.dp),
+    large = androidx.compose.foundation.shape.RoundedCornerShape(18.dp)
 )
 
 @Composable

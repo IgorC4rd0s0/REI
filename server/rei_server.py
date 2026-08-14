@@ -16,6 +16,8 @@ import secrets
 import sqlite3
 import mimetypes
 import unicodedata
+import urllib.error
+import urllib.request
 from decimal import Decimal, InvalidOperation
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -37,7 +39,6 @@ def load_config() -> dict:
 CONFIG = load_config()
 DATABASE = ROOT / CONFIG.get("database", "data/rei_central.db")
 DATABASE.parent.mkdir(parents=True, exist_ok=True)
-SCHEMA_ITEMS_PATH = DATABASE.parent / "schema_items.json"
 REI_ITEM_AREAS = {
     "modules": "Módulos contratados",
     "technical": "Técnico",
@@ -69,6 +70,17 @@ CONDITION_OPERATORS = {
 }
 SCHEMA_RULE_VERSION = "required-rules-v1"
 
+CHAT_SKILLS = {
+    "erp-levantamento-diagnostico": "erp-levantamento-diagnostico/SKILL.md",
+    "erp-conversao-auditoria": "erp-conversao-auditoria/SKILL.md",
+    "erp-parametrizacao-brasil": "erp-parametrizacao-brasil/SKILL.md",
+    "erp-testes-go-live-suporte": "erp-testes-go-live-suporte/SKILL.md",
+}
+CHAT_MESSAGE_MAX_BYTES = 12_000
+CHAT_CONTEXT_MAX_CHARS = 24_000
+CHAT_RATE_WINDOW_SECONDS = 60
+CHAT_RATE_LIMIT = 30
+
 
 def empty_schema_items() -> dict:
     return {
@@ -82,6 +94,11 @@ def empty_schema_items() -> dict:
         },
         "levantamento": [],
     }
+
+
+def schema_items_path() -> Path:
+    """Mantém as personalizações de esquema junto ao banco ativo."""
+    return DATABASE.parent / "schema_items.json"
 
 
 REI_SCOPES = {
@@ -274,13 +291,14 @@ def normalize_schema_items(data: dict | None, strict: bool = False) -> dict:
 
 
 def load_schema_items() -> dict:
-    if not SCHEMA_ITEMS_PATH.exists():
+    path = schema_items_path()
+    if not path.exists():
         return empty_schema_items()
     try:
-        raw = json.loads(SCHEMA_ITEMS_PATH.read_text(encoding="utf-8"))
+        raw = json.loads(path.read_text(encoding="utf-8"))
         normalized = normalize_schema_items(raw)
         if canonical(raw) != canonical(normalized):
-            SCHEMA_ITEMS_PATH.write_text(
+            path.write_text(
                 json.dumps(normalized, ensure_ascii=False, indent=2), encoding="utf-8"
             )
         return normalized
@@ -290,10 +308,11 @@ def load_schema_items() -> dict:
 
 
 def save_schema_items(data: dict) -> None:
-    SCHEMA_ITEMS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    path = schema_items_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
     normalized = normalize_schema_items(data, strict=True)
     validate_schema_references(effective_schema_from_custom(normalized))
-    SCHEMA_ITEMS_PATH.write_text(
+    path.write_text(
         json.dumps(normalized, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
@@ -2030,8 +2049,64 @@ def initialize_database() -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_device_heartbeats_seen ON device_heartbeats(last_seen DESC);
             CREATE INDEX IF NOT EXISTS idx_device_heartbeats_username ON device_heartbeats(username);
+
+            CREATE TABLE IF NOT EXISTS chat_sessions (
+                id TEXT PRIMARY KEY,
+                report_id TEXT NOT NULL,
+                user_id INTEGER NOT NULL,
+                skill_code TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'ACTIVE',
+                server_conversation_id TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                sync_status TEXT NOT NULL DEFAULT 'SYNCED',
+                FOREIGN KEY(report_id) REFERENCES reports(id) ON DELETE CASCADE,
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_chat_sessions_report ON chat_sessions(report_id, updated_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_chat_sessions_user ON chat_sessions(user_id, updated_at DESC);
+
+            CREATE TABLE IF NOT EXISTS chat_messages (
+                id TEXT PRIMARY KEY,
+                local_idempotency_key TEXT NOT NULL UNIQUE,
+                session_id TEXT NOT NULL,
+                report_id TEXT NOT NULL,
+                user_id INTEGER NOT NULL,
+                role TEXT NOT NULL CHECK(role IN ('user', 'assistant', 'system')),
+                content TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'PENDING',
+                created_at TEXT NOT NULL,
+                sent_at TEXT,
+                received_at TEXT,
+                server_response_id TEXT NOT NULL DEFAULT '',
+                error_message TEXT,
+                FOREIGN KEY(session_id) REFERENCES chat_sessions(id) ON DELETE CASCADE,
+                FOREIGN KEY(report_id) REFERENCES reports(id) ON DELETE CASCADE,
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(session_id, created_at);
+            CREATE INDEX IF NOT EXISTS idx_chat_messages_report ON chat_messages(report_id, created_at);
+
+            CREATE TABLE IF NOT EXISTS chat_suggestions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                report_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                type TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'WAITING_CONFIRMATION',
+                created_at TEXT NOT NULL,
+                confirmed_at TEXT,
+                confirmed_by INTEGER,
+                FOREIGN KEY(report_id) REFERENCES reports(id) ON DELETE CASCADE,
+                FOREIGN KEY(session_id) REFERENCES chat_sessions(id) ON DELETE CASCADE,
+                FOREIGN KEY(confirmed_by) REFERENCES users(id) ON DELETE SET NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_chat_suggestions_report ON chat_suggestions(report_id, created_at DESC);
             """)
         report_columns = {row[1] for row in db.execute("PRAGMA table_info(reports)")}
+        user_columns = {row[1] for row in db.execute("PRAGMA table_info(users)")}
+        if "photo_data" not in user_columns:
+            db.execute("ALTER TABLE users ADD COLUMN photo_data TEXT NOT NULL DEFAULT ''")
         report_migrations = {
             "created_by_user_id": "INTEGER",
             "stage": "TEXT NOT NULL DEFAULT ''",
@@ -2216,11 +2291,46 @@ def user_from_token(token: str) -> dict | None:
     now = datetime.now(timezone.utc).isoformat()
     with connect() as db:
         row = db.execute(
-            "SELECT u.id, u.username, u.full_name, u.role, u.active FROM sessions s "
+            "SELECT u.id, u.username, u.full_name, u.role, u.active, u.photo_data FROM sessions s "
             "JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at>? AND u.active=1",
             (digest, now),
         ).fetchone()
-    return dict(row) if row else None
+    if not row:
+        return None
+    user = dict(row)
+    user["fullName"] = user["full_name"]
+    user["photoData"] = user.pop("photo_data", "")
+    return user
+
+
+def validate_profile_photo(photo_data: str) -> str:
+    value = str(photo_data or "").strip()
+    if not value:
+        return ""
+    if len(value) > 1_500_000:
+        raise ValueError("A foto deve ter no máximo 1 MB")
+    if not re.fullmatch(r"data:image/(?:jpeg|png|webp);base64,[A-Za-z0-9+/=\r\n]+", value):
+        raise ValueError("Formato de foto inválido. Use JPG, PNG ou WEBP")
+    return value
+
+
+def update_user_photo(user_id: int, photo_data: str) -> dict:
+    value = validate_profile_photo(photo_data)
+    with connect() as db:
+        cursor = db.execute(
+            "UPDATE users SET photo_data=?,updated_at=? WHERE id=?",
+            (value, datetime.now(timezone.utc).isoformat(), user_id),
+        )
+        if cursor.rowcount != 1:
+            raise ValueError("Usuário não encontrado")
+        row = db.execute(
+            "SELECT id,username,full_name,role,active,photo_data FROM users WHERE id=?",
+            (user_id,),
+        ).fetchone()
+    result = dict(row)
+    result["fullName"] = result["full_name"]
+    result["photoData"] = result.pop("photo_data", "")
+    return result
 
 
 def revoke_session(token: str) -> None:
@@ -2355,13 +2465,14 @@ def list_users(role: str | None = None) -> list[dict]:
         where += " AND role=?"
         params.append(role)
     with connect() as db:
-        return [
-            dict(row)
-            for row in db.execute(
-                f"SELECT id, username, full_name, role FROM users {where} ORDER BY full_name, username",
-                params,
-            )
-        ]
+        rows = db.execute(
+            f"SELECT id, username, full_name, role, photo_data FROM users {where} ORDER BY full_name, username",
+            params,
+        ).fetchall()
+    return [
+        {**dict(row), "photoData": row["photo_data"] or ""}
+        for row in rows
+    ]
 
 
 def report_value(report: dict, key: str) -> object:
@@ -3304,6 +3415,296 @@ def list_reports_for_user(
     return rows
 
 
+class ChatRequestError(ValueError):
+    """Erro de domínio do assistente, convertido em JSON pela API."""
+
+    def __init__(self, status: int, code: str, message: str, details: object | None = None):
+        super().__init__(message)
+        self.status = status
+        self.code = code
+        self.details = details
+
+
+def validate_chat_skill(skill_code: object) -> str:
+    value = str(skill_code or "").strip()
+    if value not in CHAT_SKILLS:
+        raise ChatRequestError(422, "invalid_skill", "Skill de atendimento não permitida.")
+    return value
+
+
+def _chat_timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _chat_report_access(db: sqlite3.Connection, report_id: str, user: dict) -> sqlite3.Row:
+    row = db.execute(
+        "SELECT id,client,stage,owner_username,assigned_username,created_by_user_id,payload_json "
+        "FROM reports WHERE id=?",
+        (report_id,),
+    ).fetchone()
+    if not row:
+        raise ChatRequestError(404, "report_not_found", "Levantamento não encontrado.")
+    if user.get("role") == "supervisor":
+        return row
+    username = str(user.get("username") or "").strip().casefold()
+    allowed = {
+        str(row["owner_username"] or "").strip().casefold(),
+        str(row["assigned_username"] or "").strip().casefold(),
+    }
+    if row["created_by_user_id"] is not None and int(row["created_by_user_id"]) == int(user["id"]):
+        allowed.add(username)
+    if username not in allowed:
+        raise ChatRequestError(403, "chat_forbidden", "Você não tem acesso a este levantamento.")
+    return row
+
+
+def _chat_context(row: sqlite3.Row, db: sqlite3.Connection, session_id: str | None = None) -> str:
+    try:
+        payload = json.loads(row["payload_json"] or "{}")
+        report = payload.get("report") or {}
+    except (TypeError, ValueError):
+        report = {}
+    fields = report.get("fields") if isinstance(report.get("fields"), dict) else {}
+    safe_fields = {
+        str(key): str(value)[:2_000]
+        for key, value in fields.items()
+        if not str(key).lower().endswith(("imagem", "photo", "assinatura"))
+        and not str(value).startswith("data:image/")
+    }
+    checks = report.get("checks") if isinstance(report.get("checks"), list) else []
+    attachments = report.get("attachments") if isinstance(report.get("attachments"), list) else []
+    evidence = [
+        {"name": str(item.get("name") or "Arquivo"), "mimeType": str(item.get("mimeType") or "")}
+        for item in attachments if isinstance(item, dict)
+    ]
+    recent = []
+    if session_id:
+        recent = [
+            {"role": item["role"], "content": item["content"][:4_000]}
+            for item in db.execute(
+                "SELECT role,content FROM chat_messages WHERE session_id=? ORDER BY created_at DESC LIMIT 12",
+                (session_id,),
+            ).fetchall()
+        ][::-1]
+    context = {
+        "levantamento_id": row["id"],
+        "cliente": row["client"],
+        "etapa": row["stage"],
+        "campos": safe_fields,
+        "checklist_marcado": [str(value) for value in checks[:400]],
+        "evidencias": evidence[:100],
+        "mensagens_recentes": recent,
+    }
+    return json.dumps(context, ensure_ascii=False, separators=(",", ":"))[:CHAT_CONTEXT_MAX_CHARS]
+
+
+def _chat_skill_instructions(skill_code: str) -> str:
+    path = ROOT / "skills" / CHAT_SKILLS[skill_code]
+    try:
+        return path.read_text(encoding="utf-8")[:16_000]
+    except OSError:
+        return f"Atue como assistente especializado na Skill {skill_code}. Não invente fatos e sinalize pendências."
+
+
+def _extract_response_text(body: dict) -> str:
+    output_text = body.get("output_text")
+    if isinstance(output_text, str) and output_text.strip():
+        return output_text.strip()
+    chunks: list[str] = []
+    for output in body.get("output") or []:
+        for content in output.get("content") or []:
+            text = content.get("text") if isinstance(content, dict) else None
+            if isinstance(text, str):
+                chunks.append(text)
+    return "\n".join(chunks).strip()
+
+
+def call_openai_chat(skill_code: str, context: str, messages: list[dict]) -> tuple[dict, str]:
+    """Chama Responses API somente no servidor; não há chave no APK nem no código."""
+    api_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        raise ChatRequestError(503, "ai_not_configured", "Assistente indisponível: OPENAI_API_KEY não configurada no servidor.")
+    model = os.environ.get("OPENAI_MODEL", "gpt-4.1-mini").strip() or "gpt-4.1-mini"
+    try:
+        max_tokens = min(max(int(os.environ.get("OPENAI_MAX_OUTPUT_TOKENS", "900")), 200), 4_000)
+    except ValueError:
+        max_tokens = 900
+    instructions = (
+        _chat_skill_instructions(skill_code)
+        + "\n\nVocê atende o R.E.I. com segurança. Use somente o contexto fornecido. "
+        "Não execute nem sugira SQL livre, não altere dados diretamente e não aprove conversões. "
+        "Responda exclusivamente em JSON com as chaves answer, questions, facts, pending_items, risks, "
+        "suggestions, evidence_ids, requires_confirmation e confidence."
+        + "\nCONTEXTO:\n" + context
+    )
+    request_messages = [
+        {"role": item["role"], "content": item["content"]}
+        for item in messages[-12:]
+        if item.get("role") in {"user", "assistant"} and str(item.get("content") or "").strip()
+    ]
+    body = json.dumps(
+        {"model": model, "instructions": instructions, "input": request_messages,
+         "max_output_tokens": max_tokens},
+        ensure_ascii=False,
+    ).encode("utf-8")
+    request = urllib.request.Request(
+        "https://api.openai.com/v1/responses", data=body, method="POST",
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "Accept": "application/json"},
+    )
+    try:
+        timeout = float(os.environ.get("OPENAI_TIMEOUT_SECONDS", "20"))
+        with urllib.request.urlopen(request, timeout=max(3.0, min(timeout, 60.0))) as response:
+            result = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as error:
+        raise ChatRequestError(502, "ai_provider_error", "O provedor do assistente recusou a solicitação.") from error
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
+        raise ChatRequestError(504, "ai_timeout", "O assistente demorou além do limite configurado.") from error
+    text = _extract_response_text(result)
+    if not text:
+        raise ChatRequestError(502, "ai_empty_response", "O assistente não retornou uma resposta.")
+    try:
+        structured = json.loads(text)
+    except json.JSONDecodeError:
+        structured = {"answer": text}
+    if not isinstance(structured, dict):
+        structured = {"answer": text}
+    response = {
+        "answer": str(structured.get("answer") or text),
+        "questions": structured.get("questions") if isinstance(structured.get("questions"), list) else [],
+        "facts": structured.get("facts") if isinstance(structured.get("facts"), list) else [],
+        "pending_items": structured.get("pending_items") if isinstance(structured.get("pending_items"), list) else [],
+        "risks": structured.get("risks") if isinstance(structured.get("risks"), list) else [],
+        "suggestions": structured.get("suggestions") if isinstance(structured.get("suggestions"), list) else [],
+        "evidence_ids": structured.get("evidence_ids") if isinstance(structured.get("evidence_ids"), list) else [],
+        "requires_confirmation": bool(structured.get("requires_confirmation", False)),
+        "confidence": str(structured.get("confidence") or "medium"),
+        "skill_code": skill_code,
+    }
+    return response, str(result.get("id") or "")
+
+
+def create_chat_session(report_id: str, user: dict, skill_code: object) -> dict:
+    skill = validate_chat_skill(skill_code)
+    now = _chat_timestamp()
+    session_id = secrets.token_urlsafe(18)
+    with connect() as db:
+        _chat_report_access(db, report_id, user)
+        db.execute(
+            "INSERT INTO chat_sessions(id,report_id,user_id,skill_code,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
+            (session_id, report_id, int(user["id"]), skill, "ACTIVE", now, now),
+        )
+    return {"id": session_id, "reportId": report_id, "skillCode": skill, "status": "ACTIVE", "createdAt": now, "updatedAt": now}
+
+
+def _chat_session_for_user(db: sqlite3.Connection, session_id: str, report_id: str, user: dict) -> sqlite3.Row:
+    session = db.execute("SELECT * FROM chat_sessions WHERE id=? AND report_id=?", (session_id, report_id)).fetchone()
+    if not session or (user.get("role") != "supervisor" and int(session["user_id"]) != int(user["id"])):
+        raise ChatRequestError(403, "chat_forbidden", "Sessão de assistente não pertence ao usuário.")
+    return session
+
+
+def send_chat_message(report_id: str, user: dict, payload: dict) -> dict:
+    session_id = str(payload.get("sessionId") or "").strip()
+    content = str(payload.get("content") or "").strip()
+    idempotency = str(payload.get("localIdempotencyKey") or "").strip()
+    if not session_id or not content or not idempotency:
+        raise ChatRequestError(422, "invalid_chat_message", "sessionId, localIdempotencyKey e content são obrigatórios.")
+    if len(content.encode("utf-8")) > CHAT_MESSAGE_MAX_BYTES:
+        raise ChatRequestError(422, "chat_message_too_large", "A mensagem excede o limite permitido.")
+    now = _chat_timestamp()
+    with connect() as db:
+        row = _chat_report_access(db, report_id, user)
+        session = _chat_session_for_user(db, session_id, report_id, user)
+        recent = db.execute(
+            "SELECT COUNT(*) AS total FROM chat_messages WHERE user_id=? AND created_at>=?",
+            (int(user["id"]), (datetime.now(timezone.utc) - timedelta(seconds=CHAT_RATE_WINDOW_SECONDS)).isoformat()),
+        ).fetchone()["total"]
+        if int(recent) >= CHAT_RATE_LIMIT:
+            raise ChatRequestError(429, "chat_rate_limited", "Limite temporário de mensagens atingido.")
+        existing = db.execute("SELECT * FROM chat_messages WHERE local_idempotency_key=?", (idempotency,)).fetchone()
+        if existing:
+            assistant = db.execute(
+                "SELECT * FROM chat_messages WHERE local_idempotency_key=? LIMIT 1",
+                (f"{idempotency}:assistant",),
+            ).fetchone()
+            return {"messageId": existing["id"], "sessionId": session_id, "status": existing["status"], "response": _chat_message_response(assistant) if assistant else None}
+        message_id = secrets.token_urlsafe(18)
+        db.execute(
+            "INSERT INTO chat_messages(id,local_idempotency_key,session_id,report_id,user_id,role,content,status,created_at,sent_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (message_id, idempotency, session_id, report_id, int(user["id"]), "user", content, "SENDING", now, now),
+        )
+        recent_messages = [dict(item) for item in db.execute(
+            "SELECT role,content FROM chat_messages WHERE session_id=? ORDER BY created_at DESC LIMIT 12", (session_id,)
+        ).fetchall()][::-1]
+        context = _chat_context(row, db, session_id)
+        skill = str(session["skill_code"])
+        try:
+            response, provider_id = call_openai_chat(skill, context, recent_messages)
+        except ChatRequestError as error:
+            db.execute("UPDATE chat_messages SET status='FAILED',error_message=? WHERE id=?", (str(error), message_id))
+            raise
+        answer_id = secrets.token_urlsafe(18)
+        assistant_content = json.dumps(response, ensure_ascii=False)
+        db.execute(
+            "UPDATE chat_messages SET status='SENT' WHERE id=?",
+            (message_id,),
+        )
+        db.execute(
+            "INSERT INTO chat_messages(id,local_idempotency_key,session_id,report_id,user_id,role,content,status,created_at,received_at,server_response_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (answer_id, f"{idempotency}:assistant", session_id, report_id, int(user["id"]), "assistant", assistant_content, "RECEIVED", now, now, provider_id),
+        )
+        for suggestion in response.get("suggestions", []):
+            if isinstance(suggestion, dict):
+                db.execute(
+                    "INSERT INTO chat_suggestions(report_id,session_id,type,payload_json,status,created_at) VALUES(?,?,?,?,?,?)",
+                    (report_id, session_id, str(suggestion.get("type") or "recommendation"), json.dumps(suggestion, ensure_ascii=False), "WAITING_CONFIRMATION", now),
+                )
+        db.execute("UPDATE chat_sessions SET updated_at=? WHERE id=?", (now, session_id))
+        return {"messageId": message_id, "sessionId": session_id, "status": "RECEIVED", "response": response}
+
+
+def _chat_message_response(row: sqlite3.Row | None) -> dict | None:
+    if not row:
+        return None
+    if row["role"] != "assistant":
+        return None
+    try:
+        value = json.loads(row["content"])
+        return value if isinstance(value, dict) else {"answer": row["content"]}
+    except (TypeError, ValueError):
+        return {"answer": row["content"]}
+
+
+def list_chat_messages(report_id: str, user: dict, session_id: str) -> list[dict]:
+    with connect() as db:
+        _chat_report_access(db, report_id, user)
+        _chat_session_for_user(db, session_id, report_id, user)
+        rows = db.execute(
+            "SELECT id,local_idempotency_key,role,content,status,created_at,sent_at,received_at,error_message FROM chat_messages WHERE session_id=? ORDER BY created_at",
+            (session_id,),
+        ).fetchall()
+    result = []
+    for row in rows:
+        content = row["content"]
+        if row["role"] == "assistant":
+            parsed = _chat_message_response(row)
+            content = parsed or {"answer": content}
+        result.append({"id": row["id"], "localIdempotencyKey": row["local_idempotency_key"], "role": row["role"], "content": content, "status": row["status"], "createdAt": row["created_at"], "sentAt": row["sent_at"], "receivedAt": row["received_at"], "errorMessage": row["error_message"] or ""})
+    return result
+
+
+def update_chat_suggestion(suggestion_id: int, user: dict, accepted: bool) -> dict:
+    with connect() as db:
+        row = db.execute("SELECT * FROM chat_suggestions WHERE id=?", (suggestion_id,)).fetchone()
+        if not row:
+            raise ChatRequestError(404, "suggestion_not_found", "Sugestão não encontrada.")
+        _chat_report_access(db, row["report_id"], user)
+        status = "CONFIRMED" if accepted else "REJECTED"
+        now = _chat_timestamp()
+        db.execute("UPDATE chat_suggestions SET status=?,confirmed_at=?,confirmed_by=? WHERE id=?", (status, now, int(user["id"]), suggestion_id))
+    return {"id": suggestion_id, "status": status, "confirmedAt": now}
+
+
 DASHBOARD_STAGE_LABELS = {
     "levantamento_pendente": "Levantamentos pendentes",
     "rei_pendente": "R.E.I. pendentes",
@@ -3646,7 +4047,7 @@ def admin_html(user: dict | None, message: str = "", error: str = "") -> str:
     :root{--navy:#263a7a;--dark:#172653;--green:#58ad45;--bg:#f4f6fa;--line:#e1e5ee;--muted:#727b90}
     *{box-sizing:border-box}body{margin:0;font-family:Inter,Segoe UI,Arial,sans-serif;background:var(--bg);color:#20283b}
     header.topbar{position:sticky;top:0;z-index:5;min-height:48px;background:#fff;border-bottom:1px solid var(--line);padding:6px clamp(12px,2.4vw,24px);display:grid;grid-template-columns:auto minmax(12px,1fr) auto auto auto auto;align-items:center;gap:10px;box-shadow:0 1px 3px rgba(27,36,55,.05)}
-    .topbar .brand{display:flex;align-items:center;min-width:46px;text-decoration:none}.topbar .brand img{width:46px;height:46px;object-fit:contain;display:block}.topbar .brand .theme-logo-dark{display:none}.login .brand{display:flex;align-items:center;justify-content:center;width:100%;min-height:112px}.login .brand img{width:108px;height:108px;object-fit:contain}
+    .topbar .brand{display:flex;align-items:center;min-width:46px;text-decoration:none}.topbar .brand img{width:46px;height:46px;object-fit:contain;display:block}.brand .theme-logo-dark{display:none}.login .brand{display:flex;align-items:center;justify-content:center;width:100%;min-height:112px}.login .brand img{width:108px;height:108px;object-fit:contain;flex:0 0 108px}
     .spacer{flex:1}.header-pill{min-height:32px;display:inline-flex;align-items:center;justify-content:center;border-radius:999px;background:#eef2fb;color:#263a7a;padding:5px 9px;font-size:11px;font-weight:700;white-space:nowrap}.topbar .nav{height:38px;min-height:38px;display:inline-flex;align-items:center;justify-content:center;gap:7px;text-decoration:none;border:1px solid var(--line);border-radius:12px;padding:0 13px;font-size:13px;font-weight:800;white-space:nowrap;color:var(--navy);background:#fff}.topbar .nav svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}.topbar .nav.gear{width:44px;padding:0;cursor:pointer}
     main{max-width:1080px;margin:34px auto;padding:0 20px}.hero{background:linear-gradient(135deg,var(--dark),var(--navy));color:#fff;border-radius:24px;padding:28px;margin-bottom:22px}
     .hero h1{margin:0 0 7px}.hero p{margin:0;color:#d7def7}.grid{display:grid;grid-template-columns:360px 1fr;gap:20px}.card{background:#fff;border:1px solid var(--line);border-radius:20px;padding:22px}
@@ -3656,10 +4057,10 @@ def admin_html(user: dict | None, message: str = "", error: str = "") -> str:
     .btn.secondary,.logout{background:#fff;color:var(--navy);border-color:var(--line)}.btn.danger{background:#fde9e6;color:#a52b22;border-color:#f3c9c4}.modal{position:fixed;inset:0;background:rgba(12,19,40,.48);display:grid;place-items:center;z-index:20;padding:18px}.modal .card{width:min(540px,100%);max-height:88vh;overflow:auto}.admin-modal .card{width:min(520px,100%)}.admin-settings-card .row{display:flex;align-items:center;gap:12px}.admin-settings-card h2{margin:0 0 4px;font-size:18px}.admin-settings-card h3{margin:0 0 4px;font-size:15px}.theme-settings{margin:18px 0;padding:14px;border:1px solid var(--line);border-radius:15px;background:var(--bg)}.theme-settings .muted{margin:0 0 10px}.theme-options{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}.theme-option{width:100%;background:#fff;color:var(--navy);border-color:var(--line)}.theme-option.active{background:var(--navy);color:#fff;border-color:var(--navy)}.admin-password-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.password-actions{display:flex;justify-content:flex-end;margin-top:14px}.admin-settings-actions{display:flex;align-items:center;justify-content:flex-end;gap:10px;margin-top:20px;padding-top:16px;border-top:1px solid var(--line)}.admin-settings-actions form{margin:0}table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:12px 10px;border-bottom:1px solid var(--line);font-size:13px}
     th{color:var(--muted);font-size:11px;text-transform:uppercase}.badge{display:inline-block;padding:5px 9px;border-radius:20px;background:#e9f5e6;color:#3b7131;font-size:11px;font-weight:700}
     .badge.implantador{background:#e9edfb;color:var(--navy)}.notice,.error{padding:12px 15px;border-radius:11px;margin-bottom:15px}.notice{background:#e9f5e6;color:#35682d}.error{background:#fdeaea;color:#9a3030}
-    .login{max-width:430px;margin:70px auto}.muted{color:var(--muted);font-size:13px}.user-actions{display:flex;align-items:flex-start;gap:8px;flex-wrap:wrap}.password-reset{position:relative}.password-reset summary{list-style:none;cursor:pointer;border-radius:11px;padding:12px 14px;font-weight:700;color:var(--navy);background:#eef1f7;white-space:nowrap}.password-reset summary::-webkit-details-marker{display:none}.password-reset[open] form{position:absolute;right:0;top:48px;z-index:4;width:260px;padding:14px;background:#fff;border:1px solid var(--line);border-radius:14px;box-shadow:0 16px 35px rgba(23,38,83,.18)}.password-reset form label{margin-top:0}.password-reset form input{margin-bottom:10px}.password-reset form button{width:100%}@media(max-width:860px){header.topbar{grid-template-columns:auto minmax(8px,1fr) auto}.header-pill{grid-column:1/-1;justify-self:stretch}.grid{grid-template-columns:1fr}.password-reset[open] form{position:fixed;left:18px;right:18px;top:20%;width:auto}.admin-password-grid{grid-template-columns:1fr}.admin-settings-actions{flex-wrap:wrap}.admin-settings-actions button,.admin-settings-actions form{width:100%}.admin-settings-actions form button{width:100%}}
+    .login{max-width:430px;margin:70px auto}.muted{color:var(--muted);font-size:13px}.user-identity{display:flex;align-items:center;gap:10px}.user-avatar{width:38px;height:38px;border-radius:50%;object-fit:cover;background:var(--navy);color:#fff;display:grid;place-items:center;font-size:12px;font-weight:900;flex:0 0 auto}.user-actions{display:flex;align-items:flex-start;gap:8px;flex-wrap:wrap}.user-photo-input{display:none}.password-reset{position:relative}.password-reset summary{list-style:none;cursor:pointer;border-radius:11px;padding:12px 14px;font-weight:700;color:var(--navy);background:#eef1f7;white-space:nowrap}.password-reset summary::-webkit-details-marker{display:none}.password-reset[open] form{position:absolute;right:0;top:48px;z-index:4;width:260px;padding:14px;background:#fff;border:1px solid var(--line);border-radius:14px;box-shadow:0 16px 35px rgba(23,38,83,.18)}.password-reset form label{margin-top:0}.password-reset form input{margin-bottom:10px}.password-reset form button{width:100%}@media(max-width:860px){header.topbar{grid-template-columns:auto minmax(8px,1fr) auto}.header-pill{grid-column:1/-1;justify-self:stretch}.grid{grid-template-columns:1fr}.password-reset[open] form{position:fixed;left:18px;right:18px;top:20%;width:auto}.admin-password-grid{grid-template-columns:1fr}.admin-settings-actions{flex-wrap:wrap}.admin-settings-actions button,.admin-settings-actions form{width:100%}.admin-settings-actions form button{width:100%}}
     html[data-theme="dark"]{--navy:#afc0ff;--dark:#1b2d64;--green:#91da7d;--bg:#080e1b;--line:#46536e;--muted:#d4dbea;color-scheme:dark}html[data-theme="dark"] body{color:#f7f9ff;background:#080e1b}html[data-theme="dark"] header,html[data-theme="dark"] .card,html[data-theme="dark"] .password-reset[open] form{background:#151d2d;border-color:var(--line)}html[data-theme="dark"] header{box-shadow:0 5px 18px rgba(0,0,0,.24)}html[data-theme="dark"] input,html[data-theme="dark"] select{background:#0d1524;border-color:#4d5b77;color:#f7f9ff}html[data-theme="dark"] label,html[data-theme="dark"] .muted{color:#d4dbea}html[data-theme="dark"] .logout,html[data-theme="dark"] .password-reset summary,html[data-theme="dark"] .theme-option{background:#222d42;color:#f1f4ff;border-color:#52617f}html[data-theme="dark"] .theme-option.active{background:#405aa8;color:#fff;border-color:#6079c8}html[data-theme="dark"] th,html[data-theme="dark"] td{border-color:var(--line)}html[data-theme="dark"] .brand .theme-logo-light{display:none}html[data-theme="dark"] .brand .theme-logo-dark{display:block;filter:none}html[data-theme="dark"] header .brand img{width:56px;height:56px}html[data-theme="dark"] .login .brand img{width:108px;height:108px;filter:none}
     html[data-theme="dark"] .hero{background:linear-gradient(135deg,#1b2d64,#30478f);border:1px solid #425a9c}html[data-theme="dark"] button{background:#405aa8;color:#fff}html[data-theme="dark"] .topbar .nav{background:#151d2d;border-color:#46536e;color:#f1f4ff}html[data-theme="dark"] .header-pill{background:#293754;border:1px solid #465676;color:#f1f4ff}
-    </style><script src="/web/admin-settings.js"></script></head><body>"""
+    </style><link rel="stylesheet" href="/web/admin-unified.css"><script src="/web/admin-settings.js"></script></head><body>"""
     base_end = "</main></body></html>"
     if users_count() == 0:
         return (
@@ -3693,10 +4094,16 @@ def admin_html(user: dict | None, message: str = "", error: str = "") -> str:
         )
     with connect() as db:
         users = db.execute(
-            "SELECT id,username,full_name,role,active,created_at FROM users ORDER BY full_name"
+            "SELECT id,username,full_name,role,active,created_at,photo_data FROM users ORDER BY full_name"
         ).fetchall()
+    def user_avatar(row: sqlite3.Row) -> str:
+        initials = "".join(part[:1] for part in str(row["full_name"]).split()[:2]).upper() or "?"
+        if row["photo_data"]:
+            return f"<img class='user-avatar' src='{html.escape(row['photo_data'], quote=True)}' alt='Foto de {html.escape(row['full_name'])}'>"
+        return f"<span class='user-avatar'>{html.escape(initials)}</span>"
+
     rows = "".join(
-        f"<tr><td><strong>{html.escape(row['full_name'])}</strong><br><span class='muted'>@{html.escape(row['username'])}</span></td>"
+        f"<tr><td><div class='user-identity'>{user_avatar(row)}<span><strong>{html.escape(row['full_name'])}</strong><br><span class='muted'>@{html.escape(row['username'])}</span></span></div></td>"
         f"<td><span class='badge {row['role']}'>{html.escape(row['role'].title())}</span></td>"
         f"<td>{'Ativo' if row['active'] else 'Inativo'}</td>"
         f"<td><div class='user-actions'><form method='post' action='/admin/users/toggle'><input type='hidden' name='id' value='{row['id']}'>"
@@ -3704,7 +4111,9 @@ def admin_html(user: dict | None, message: str = "", error: str = "") -> str:
         f"<details class='password-reset'><summary>Alterar senha</summary><form method='post' action='/admin/users/password'>"
         f"<input type='hidden' name='id' value='{row['id']}'><label>Nova senha</label><input type='password' name='new_password' required minlength='8' autocomplete='new-password'>"
         f"<label>Confirmar nova senha</label><input type='password' name='confirmation' required minlength='8' autocomplete='new-password'>"
-        f"<button type='submit'>Salvar nova senha</button></form></details></div></td></tr>"
+        f"<button type='submit'>Salvar nova senha</button></form></details>"
+        f"<input class='user-photo-input' type='file' accept='image/jpeg,image/png,image/webp' data-user-photo='{row['id']}'>"
+        f"<button type='button' class='logout' onclick=\"this.previousElementSibling.click()\">Alterar foto</button></div></td></tr>"
         for row in users
     )
     page = (
@@ -3715,7 +4124,24 @@ def admin_html(user: dict | None, message: str = "", error: str = "") -> str:
     <label>Nome completo</label><input name="full_name" required minlength="3"><label>Usuário</label><input name="username" required minlength="3">
     <label>Perfil</label><select name="role"><option value="implantador">Implantador</option><option value="supervisor">Supervisor</option></select>
     <label>Senha provisória</label><input type="password" name="password" required minlength="8"><button class="full">Cadastrar usuário</button></form></section>
-    <section class="card"><h2>Usuários cadastrados</h2><div style="overflow:auto"><table><thead><tr><th>Usuário</th><th>Perfil</th><th>Status</th><th>Ação</th></tr></thead><tbody>{rows}</tbody></table></div></section></div>"""
+    <section class="card"><h2>Usuários cadastrados</h2><div style="overflow:auto"><table><thead><tr><th>Usuário</th><th>Perfil</th><th>Status</th><th>Ação</th></tr></thead><tbody>{rows}</tbody></table></div></section></div>
+    <script>
+    async function compactProfilePhoto(file){{
+      if(!file || !/^image[/](jpeg|png|webp)$/.test(file.type)) throw new Error('Selecione uma imagem JPG, PNG ou WEBP.');
+      const bitmap=await createImageBitmap(file), max=512, scale=Math.min(1,max/Math.max(bitmap.width,bitmap.height));
+      const canvas=document.createElement('canvas'); canvas.width=Math.max(1,Math.round(bitmap.width*scale)); canvas.height=Math.max(1,Math.round(bitmap.height*scale));
+      canvas.getContext('2d').drawImage(bitmap,0,0,canvas.width,canvas.height); bitmap.close?.();
+      return canvas.toDataURL('image/jpeg',.84);
+    }}
+    document.querySelectorAll('[data-user-photo]').forEach(input=>input.addEventListener('change',async()=>{{
+      try{{
+        const photoData=await compactProfilePhoto(input.files[0]);
+        const response=await fetch('/api/users/photo',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{userId:Number(input.dataset.userPhoto),photoData}})}});
+        const result=await response.json(); if(!response.ok) throw new Error(result.error||'Não foi possível alterar a foto.');
+        location.href='/admin?message='+encodeURIComponent('Foto atualizada com sucesso');
+      }}catch(error){{alert(error.message)}} finally{{input.value=''}}
+    }}));
+    </script>"""
         + base_end
     )
     return standardize_admin_header(page, user)
@@ -3732,7 +4158,7 @@ def admin_items_html(user: dict | None, message: str = "", error: str = "") -> s
     :root{--navy:#263a7a;--dark:#172653;--green:#58ad45;--bg:#f4f6fa;--line:#e1e5ee;--muted:#727b90;--soft:#f8faff}
     *{box-sizing:border-box}body{margin:0;font-family:Inter,Segoe UI,Arial,sans-serif;background:var(--bg);color:#20283b}
     header.topbar{position:sticky;top:0;z-index:5;min-height:48px;background:#fff;border-bottom:1px solid var(--line);padding:6px clamp(12px,2.4vw,24px);display:grid;grid-template-columns:auto minmax(12px,1fr) auto auto auto auto;align-items:center;gap:10px;box-shadow:0 1px 3px rgba(27,36,55,.05)}
-    .topbar .brand{display:flex;align-items:center;min-width:46px;text-decoration:none}.topbar .brand img{width:46px;height:46px;object-fit:contain;display:block}.topbar .brand .theme-logo-dark{display:none}
+    .topbar .brand{display:flex;align-items:center;min-width:46px;text-decoration:none}.topbar .brand img{width:46px;height:46px;object-fit:contain;display:block}.brand .theme-logo-dark{display:none}
     .spacer{flex:1}.header-pill{min-height:32px;display:inline-flex;align-items:center;justify-content:center;border-radius:999px;background:#eef2fb;color:#263a7a;padding:5px 9px;font-size:11px;font-weight:700;white-space:nowrap}.topbar .nav{height:38px;min-height:38px;display:inline-flex;align-items:center;justify-content:center;gap:7px;text-decoration:none;border:1px solid var(--line);border-radius:12px;padding:0 13px;font-size:13px;font-weight:800;white-space:nowrap;color:var(--navy);background:#fff}.topbar .nav svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}.topbar .nav.gear{width:44px;padding:0;cursor:pointer}
     main{max-width:1220px;margin:22px auto;padding:0 18px 28px}.hero{background:linear-gradient(135deg,var(--dark),var(--navy));color:#fff;border-radius:22px;padding:20px 22px;margin-bottom:16px;display:flex;align-items:flex-end;justify-content:space-between;gap:16px}
     .hero h1{margin:0 0 5px;font-size:28px}.hero p{margin:0;color:#d7def7}.hero small{display:block;color:#bfc9f5;font-weight:800;text-transform:uppercase;letter-spacing:.08em;font-size:11px;margin-bottom:6px}
@@ -3755,7 +4181,7 @@ def admin_items_html(user: dict | None, message: str = "", error: str = "") -> s
     @media(max-width:1100px){.forms-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.lists-grid{grid-template-columns:1fr}}
     @media(max-width:900px){.condition-row{grid-template-columns:1fr 1fr}.condition-row .remove-condition{grid-column:1/-1}}@media(max-width:860px){header.topbar{grid-template-columns:auto minmax(8px,1fr) auto}.header-pill{grid-column:1/-1;justify-self:stretch}.hero{display:block}.item-switch,.forms-grid{grid-template-columns:1fr}.two-col,.condition-row,.admin-password-grid{grid-template-columns:1fr}main{padding:0 12px 24px}.card{padding:14px}.admin-settings-actions{flex-wrap:wrap}.admin-settings-actions button,.admin-settings-actions form{width:100%}.admin-settings-actions form button{width:100%}}
     html[data-theme="dark"]{--navy:#9bb0ff;--dark:#101933;--green:#75c361;--bg:#0d1220;--line:#343d51;--muted:#aeb8ce;--soft:#121827;color-scheme:dark}html[data-theme="dark"] body{color:#eef2ff}html[data-theme="dark"] header,html[data-theme="dark"] .card,html[data-theme="dark"] .item-switch button,html[data-theme="dark"] .source-label,html[data-theme="dark"] .field-edit[open] form,html[data-theme="dark"] .admin-settings-card{background:#171d2b;border-color:var(--line);color:#eef2ff}html[data-theme="dark"] input,html[data-theme="dark"] select,html[data-theme="dark"] textarea,html[data-theme="dark"] .empty{background:#111725;border-color:#3b465d;color:#eef2ff}html[data-theme="dark"] .form-card h2,html[data-theme="dark"] .list-card h2,html[data-theme="dark"] .topic strong,html[data-theme="dark"] .area-title{color:#dbe3ff}html[data-theme="dark"] .pill,html[data-theme="dark"] .delete,html[data-theme="dark"] .logout,html[data-theme="dark"] .field-edit summary,html[data-theme="dark"] .cancel-edit,html[data-theme="dark"] .add-condition,html[data-theme="dark"] .theme-option{background:#222a3b;color:#dbe3ff;border-color:#52617f}html[data-theme="dark"] .theme-option.active{background:#405aa8;color:#fff;border-color:#6079c8}html[data-theme="dark"] .required-never{background:#2b3549;color:#d2daed}html[data-theme="dark"] .required-always{background:#4b2528;color:#ffb7b1}html[data-theme="dark"] .required-conditional{background:#49391e;color:#ffd48c}html[data-theme="dark"] .brand .theme-logo-light{display:none}html[data-theme="dark"] .brand .theme-logo-dark{display:block;filter:none}html[data-theme="dark"] .topbar .nav{background:#171d2b;border-color:#46536e;color:#f1f4ff}html[data-theme="dark"] .header-pill{background:#293754;border:1px solid #465676;color:#f1f4ff}
-    </style><script src="/web/admin-settings.js"></script><script>
+    </style><link rel="stylesheet" href="/web/admin-unified.css"><script src="/web/admin-settings.js"></script><script>
     function showItemForms(group){
       document.querySelectorAll('[data-item-form]').forEach(function(el){el.classList.toggle('is-hidden',el.dataset.itemForm!==group);});
       document.querySelectorAll('[data-form-tab]').forEach(function(el){el.classList.toggle('active',el.dataset.formTab===group);});
@@ -4210,6 +4636,21 @@ class ReiHandler(BaseHTTPRequestHandler):
                     500, {"error": "não foi possível calcular o dashboard gerencial"}
                 )
             return
+        chat_messages_match = re.fullmatch(r"/api/levantamentos/([^/]+)/chat/mensagens", parsed.path)
+        if chat_messages_match:
+            user = self.request_user()
+            if not user:
+                self.send_json(401, {"error": "não autorizado"})
+                return
+            try:
+                query = parse_qs(parsed.query)
+                session_id = str(query.get("sessionId", [""])[0]).strip()
+                if not session_id:
+                    raise ChatRequestError(422, "invalid_chat_session", "sessionId é obrigatório.")
+                self.send_json(200, list_chat_messages(chat_messages_match.group(1), user, session_id))
+            except ChatRequestError as error:
+                self.send_json(error.status, {"error": str(error), "code": error.code})
+            return
         if parsed.path == "/api/reports":
             user = self.request_user() or self.api_supervisor()
             if not user:
@@ -4471,6 +4912,7 @@ class ReiHandler(BaseHTTPRequestHandler):
                             "username": user["username"],
                             "fullName": user["full_name"],
                             "role": user["role"],
+                            "photoData": user["photo_data"] or "",
                         },
                     },
                     f"rei_session={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000",
@@ -4503,6 +4945,22 @@ class ReiHandler(BaseHTTPRequestHandler):
             except (ValueError, json.JSONDecodeError) as error:
                 self.send_json(400, {"error": str(error)})
             return
+        if parsed.path in {"/api/auth/photo", "/api/users/photo"}:
+            user = self.request_user()
+            if not user:
+                self.send_json(401, {"error": "não autorizado"})
+                return
+            try:
+                payload = json.loads(self.read_body().decode("utf-8"))
+                target_id = int(payload.get("userId") or user["id"])
+                if target_id != int(user["id"]) and user["role"] != "supervisor":
+                    self.send_json(403, {"error": "você só pode alterar sua própria foto"})
+                    return
+                updated = update_user_photo(target_id, str(payload.get("photoData") or ""))
+                self.send_json(200, {"status": "ok", "user": updated})
+            except (ValueError, TypeError, json.JSONDecodeError) as error:
+                self.send_json(422, {"error": str(error)})
+            return
         if parsed.path == "/api/device-heartbeats":
             user = self.request_user()
             if not user:
@@ -4528,6 +4986,52 @@ class ReiHandler(BaseHTTPRequestHandler):
                         "code": "invalid_heartbeat",
                     },
                 )
+            return
+        chat_session_match = re.fullmatch(r"/api/levantamentos/([^/]+)/chat/sessoes", parsed.path)
+        if chat_session_match:
+            user = self.request_user()
+            if not user:
+                self.send_json(401, {"error": "não autorizado"})
+                return
+            try:
+                payload = json.loads(self.read_body().decode("utf-8"))
+                session = create_chat_session(chat_session_match.group(1), user, payload.get("skill_code") or payload.get("skillCode"))
+                self.send_json(201, session)
+            except ChatRequestError as error:
+                self.send_json(error.status, {"error": str(error), "code": error.code})
+            except (ValueError, json.JSONDecodeError) as error:
+                self.send_json(422, {"error": str(error), "code": "invalid_chat_session"})
+            return
+        chat_message_match = re.fullmatch(r"/api/levantamentos/([^/]+)/chat/mensagens", parsed.path)
+        if chat_message_match:
+            user = self.request_user()
+            if not user:
+                self.send_json(401, {"error": "não autorizado"})
+                return
+            try:
+                payload = json.loads(self.read_body().decode("utf-8"))
+                if not isinstance(payload, dict):
+                    raise ChatRequestError(422, "invalid_chat_message", "Estrutura da mensagem inválida.")
+                self.send_json(201, send_chat_message(chat_message_match.group(1), user, payload))
+            except ChatRequestError as error:
+                response = {"error": str(error), "code": error.code}
+                if error.details is not None:
+                    response["details"] = error.details
+                self.send_json(error.status, response)
+            except (ValueError, json.JSONDecodeError) as error:
+                self.send_json(422, {"error": str(error), "code": "invalid_chat_message"})
+            return
+        suggestion_match = re.fullmatch(r"/api/chat/sugestoes/(\d+)/(confirmar|rejeitar)", parsed.path)
+        if suggestion_match:
+            user = self.request_user()
+            if not user:
+                self.send_json(401, {"error": "não autorizado"})
+                return
+            try:
+                suggestion = update_chat_suggestion(int(suggestion_match.group(1)), user, suggestion_match.group(2) == "confirmar")
+                self.send_json(200, suggestion)
+            except ChatRequestError as error:
+                self.send_json(error.status, {"error": str(error), "code": error.code})
             return
         if parsed.path != "/api/reports":
             self.send_json(404, {"error": "rota não encontrada"})

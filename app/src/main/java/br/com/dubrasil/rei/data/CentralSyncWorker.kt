@@ -12,6 +12,8 @@ import androidx.work.WorkManager
 import androidx.work.Worker
 import androidx.work.WorkerParameters
 import java.util.concurrent.TimeUnit
+import java.util.UUID
+import org.json.JSONObject
 
 /**
  * Sincroniza somente registros pendentes quando existe uma rede não medida, normalmente o Wi-Fi
@@ -87,6 +89,10 @@ class CentralSyncWorker(context: Context, params: WorkerParameters) : Worker(con
                     retryRequired = true
                 }
         }
+        syncChatMessages(ChatClient(applicationContext)) { error ->
+            lastError = error
+            retryRequired = retryRequired || !error.contains("OPENAI_API_KEY", ignoreCase = true)
+        }
         val pendingCount = dao.countPendingSync()
         client.sendHeartbeat(pendingCount, lastError).onFailure { error ->
             if (lastError == null) lastError = error.message ?: "Falha ao enviar diagnóstico ao servidor."
@@ -94,6 +100,55 @@ class CentralSyncWorker(context: Context, params: WorkerParameters) : Worker(con
         }
         auth.finishSyncAttempt(lastError)
         return if (retryRequired) Result.retry() else Result.success()
+    }
+
+    private fun syncChatMessages(client: ChatClient, onError: (String) -> Unit) {
+        val chatDao = ReiDatabase.getInstance(applicationContext).chatDao()
+        for (message in chatDao.pendingMessages()) {
+            val session = chatDao.session(message.sessionId) ?: continue
+            var remoteId = session.serverConversationId
+            if (remoteId.isBlank()) {
+                client.createSession(message.reportId, session.skillCode)
+                    .onSuccess { created ->
+                        remoteId = created.id
+                        chatDao.markRemoteSession(session.id, remoteId, System.currentTimeMillis())
+                    }
+                    .onFailure { error ->
+                        chatDao.updateStatus(message.id, ChatMessageEntity.STATUS_FAILED, null, null, "", error.message)
+                        onError(error.message ?: "Não foi possível abrir o assistente.")
+                    }
+                if (remoteId.isBlank()) continue
+            }
+            client.sendMessage(message.reportId, remoteId, message.localIdempotencyKey, message.content)
+                .onSuccess { result ->
+                    chatDao.updateStatus(message.id, ChatMessageEntity.STATUS_SENT, System.currentTimeMillis(), null, result.messageId, null)
+                    result.response?.let { response ->
+                        chatDao.upsertMessage(ChatMessageEntity(
+                            id = UUID.randomUUID().toString(),
+                            localIdempotencyKey = "${message.localIdempotencyKey}:assistant",
+                            sessionId = message.sessionId,
+                            reportId = message.reportId,
+                            role = ChatMessageEntity.ROLE_ASSISTANT,
+                            content = response.toJson().toString(),
+                            status = ChatMessageEntity.STATUS_RECEIVED,
+                            createdAt = System.currentTimeMillis(),
+                            receivedAt = System.currentTimeMillis(),
+                            serverResponseId = result.messageId
+                        ))
+                    }
+                }
+                .onFailure { error ->
+                    chatDao.updateStatus(message.id, ChatMessageEntity.STATUS_FAILED, null, null, "", error.message)
+                    onError(error.message ?: "Falha ao sincronizar o assistente.")
+                }
+        }
+    }
+
+    private fun ChatAssistantResponse.toJson() = JSONObject().apply {
+        put("answer", answer); put("questions", questions); put("facts", facts)
+        put("pending_items", pendingItems); put("risks", risks); put("suggestions", suggestions)
+        put("evidence_ids", evidenceIds); put("requires_confirmation", requiresConfirmation)
+        put("confidence", confidence); put("skill_code", skillCode)
     }
 }
 

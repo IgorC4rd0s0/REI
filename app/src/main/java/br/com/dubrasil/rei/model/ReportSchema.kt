@@ -285,7 +285,7 @@ object ReportSchema {
             "Cadastrar funcionários", "Criar fluxograma", "Conferir versão",
             "Configurar e explicar Liberação Online")
     )
-    val technical: List<ChecklistGroup> get() = mergeGroups(baseTechnical, overrides.technical)
+    val technical: List<ChecklistGroup> get() = mergedChecklistGroups("tecnico", baseTechnical, overrides.technical)
 
     private val baseStock = listOf(
         group("estoque", "Cadastros", "Cadastro de cliente/fornecedor", "Cadastro de grupo", "Tributação do produto", "Tipo do item", "Produto ou serviço", "Ajuste de saldo"),
@@ -299,7 +299,7 @@ object ReportSchema {
             "Configurar formação de preço e custos", "Configurar e testar PDV online",
             "Configurar PDV offline e sincronização", "Validar e testar customizações contratadas")
     )
-    val stock: List<ChecklistGroup> get() = mergeGroups(baseStock, overrides.stock)
+    val stock: List<ChecklistGroup> get() = mergedChecklistGroups("estoque", baseStock, overrides.stock)
 
     private val baseFinance = listOf(
         group("financeiro", "Cadastros", "Cadastrar conta/caixa", "Cadastrar forma de pagamento", "Cadastro de contas a pagar/receber (F7)"),
@@ -307,14 +307,14 @@ object ReportSchema {
         group("financeiro", "Extratos e documentos", "Cadastro de depósito/saque/transferência (F9)", "Compensação", "Devolução de cheque", "Transferência de documentos (F3)"),
         group("financeiro", "Boletos e cartão", "Remessa", "Retorno", "Cartão", "Conciliação de cartão", "Homologação de boleto", "Homologação de API")
     )
-    val finance: List<ChecklistGroup> get() = mergeGroups(baseFinance, overrides.finance)
+    val finance: List<ChecklistGroup> get() = mergedChecklistGroups("financeiro", baseFinance, overrides.finance)
 
     private val baseFiscalReports = listOf(
         group("fiscal", "Módulo Fiscal", "Gerar Sintegra", "Envio de XML para a contabilidade", "Gerar SPED", "Relatório de entradas e saídas"),
         group("fiscal", "Relatórios financeiros", "Fechamento de caixa", "Contas a pagar/receber", "Recibo"),
         group("fiscal", "Relatórios de estoque", "Relatório de venda", "Relatório de compra", "Estoque e movimentação")
     )
-    val fiscalReports: List<ChecklistGroup> get() = mergeGroups(baseFiscalReports, overrides.fiscalReports)
+    val fiscalReports: List<ChecklistGroup> get() = mergedChecklistGroups("fiscal", baseFiscalReports, overrides.fiscalReports)
 
     private val baseSupervision = listOf(
         group("supervisao", "Planejamento e preparação", "Cronograma e etapas definidos antes do início", "Requisitos e dados validados com o cliente", "Levantamento executado e anotado", "Ambiente de testes configurado corretamente"),
@@ -323,7 +323,7 @@ object ReportSchema {
         group("supervisao", "Prazos e qualidade", "Implantação entregue no prazo", "Sem pendências críticas após a finalização", "Cliente satisfeito com o resultado geral"),
         group("supervisao", "Aprimoramento e postura", "Proatividade e iniciativa", "Pontualidade e compromisso", "Busca constante por aprendizado técnico")
     )
-    val supervision: List<ChecklistGroup> get() = mergeGroups(baseSupervision, overrides.supervision)
+    val supervision: List<ChecklistGroup> get() = mergedChecklistGroups("supervisao", baseSupervision, overrides.supervision)
     val surveySections: List<SurveySectionSchema> get() = overrides.surveySections
     val fixedRequirements: Map<String, List<SchemaItem>> get() =
         overrides.fixedRequirements.ifEmpty { baseFixedRequirements }
@@ -364,9 +364,47 @@ object ReportSchema {
     fun itemValue(data: ReportData, scope: String, group: String, item: SchemaItem): String =
         itemKeys(scope, group, item).firstNotNullOfOrNull { key -> data.fields[key]?.takeIf(String::isNotBlank) }.orEmpty()
 
-    fun allChecklistItems(): List<String> =
-        contractedModules.map(::contractedKey) + scopedKeys("tecnico", technical) +
-            scopedKeys("estoque", stock) + scopedKeys("financeiro", finance) + scopedKeys("fiscal", fiscalReports)
+    /**
+     * Chaves dos itens que entram no progresso do R.E.I.
+     *
+     * Campos dinâmicos podem substituir um item padrão (por exemplo, trocar
+     * um checkbox por foto). Nessa situação a chave antiga não pode continuar
+     * no denominador, pois a web já usa o tipo efetivo recebido do servidor.
+     */
+    fun allChecklistItems(): List<String> {
+        val checklist = deliveryChecklistEntries().map { key(it.first, it.second, it.third) }
+        return checklist
+    }
+
+    fun applicableChecklistItems(data: ReportData): List<SchemaItem> =
+        deliveryChecklistEntries()
+            .filter { isApplicable(data, it.third) }
+            .map { it.third }
+
+    fun deliveryChecklistCount(data: ReportData): Int =
+        deliveryChecklistEntries().count { (scope, group, item) ->
+            isApplicable(data, item) && isChecked(data, scope, group, item)
+        }
+
+    private fun deliveryChecklistEntries(): List<Triple<String, String, SchemaItem>> {
+        val checklist = buildList {
+            contractedModules.forEach { add(Triple("dados", "modulos", it)) }
+            technical.forEach { group -> group.items.forEach { add(Triple("tecnico", group.title, it)) } }
+            stock.forEach { group -> group.items.forEach { add(Triple("estoque", group.title, it)) } }
+            finance.forEach { group -> group.items.forEach { add(Triple("financeiro", group.title, it)) } }
+            fiscalReports.forEach { group -> group.items.forEach { add(Triple("fiscal", group.title, it)) } }
+        }
+        val dynamicOverrides = listOf("tecnico", "estoque", "financeiro", "fiscal")
+            .flatMap { scope ->
+                dynamicFields(scope).flatMap { group ->
+                    group.fields.flatMap { itemKeys(scope, group.title, it) }
+                }
+            }
+            .toSet()
+        return checklist.filterNot { (scope, group, item) ->
+            itemKeys(scope, group, item).any { it in dynamicOverrides }
+        }
+    }
     fun supervisionChecklistItems(): List<String> = scopedKeys("supervisao", supervision)
 
     private fun scopedKeys(scope: String, groups: List<ChecklistGroup>) =
@@ -389,6 +427,22 @@ object ReportSchema {
             else result += custom
         }
         return result
+    }
+
+    /** Remove o checkbox legado quando a mesma chave foi configurada como campo dinâmico. */
+    private fun mergedChecklistGroups(
+        scope: String,
+        base: List<ChecklistGroup>,
+        incoming: List<ChecklistGroup>
+    ): List<ChecklistGroup> {
+        val dynamicKeys = dynamicFields(scope)
+            .flatMap { group -> group.fields.flatMap { itemKeys(scope, group.title, it) } }
+            .toSet()
+        return mergeGroups(base, incoming).map { group ->
+            group.copy(items = group.items.filter { item ->
+                itemKeys(scope, group.title, item).none { it in dynamicKeys }
+            })
+        }
     }
 
     private fun comparison(value: String) = Normalizer.normalize(value.trim(), Normalizer.Form.NFKC)
@@ -448,6 +502,10 @@ object ReportSchema {
     }
 
     fun isRequired(data: ReportData, item: SchemaItem): Boolean = active(data, item)
+
+    /** Itens condicionais inativos não se aplicam ao projeto atual. */
+    fun isApplicable(data: ReportData, item: SchemaItem): Boolean =
+        item.requiredMode != "conditional" || active(data, item)
 
     private fun fulfilled(data: ReportData, item: SchemaItem): Boolean {
         if (item.type == "checkbox") return (listOf(item.key) + item.legacyKeys).any { checked(data, it) }

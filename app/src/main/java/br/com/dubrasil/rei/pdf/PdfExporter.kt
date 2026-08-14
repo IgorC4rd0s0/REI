@@ -563,13 +563,23 @@ object PdfExporter {
         private fun wrap(text: String, paint: Paint, maxWidth: Float): List<String> {
             if (text.isBlank()) return listOf("—")
             val result = mutableListOf<String>()
-            text.replace('\n', ' ').split(Regex("\\s+")).filter { it.isNotBlank() }.forEach { word ->
-                val current = result.lastOrNull().orEmpty()
-                val candidate = if (current.isBlank()) word else "$current $word"
-                if (paint.measureText(candidate) <= maxWidth) {
-                    if (result.isEmpty()) result.add(candidate) else result[result.lastIndex] = candidate
+            val normalized = text.replace("\r\n", "\n").replace('\r', '\n')
+            normalized.split("\n", ignoreCase = false, limit = -1).forEach { paragraph ->
+                val words = paragraph.split(Regex("\\s+")).filter { it.isNotBlank() }
+                if (words.isEmpty()) {
+                    result.add("")
                 } else {
-                    result.add(word)
+                    var current = ""
+                    words.forEach { word ->
+                        val candidate = if (current.isBlank()) word else "$current $word"
+                        if (current.isNotBlank() && paint.measureText(candidate) > maxWidth) {
+                            result.add(current)
+                            current = word
+                        } else {
+                            current = candidate
+                        }
+                    }
+                    if (current.isNotBlank()) result.add(current)
                 }
             }
             return result.ifEmpty { listOf("—") }

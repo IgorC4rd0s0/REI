@@ -20,6 +20,7 @@ import java.util.concurrent.Executors
 class ReportRepository(context: Context) {
     private val appContext = context.applicationContext
     private val dao = ReiDatabase.getInstance(appContext).reportDao()
+    private val chatDao = ReiDatabase.getInstance(appContext).chatDao()
     private val writes = Executors.newSingleThreadExecutor()
     private val legacyPrefs = appContext.getSharedPreferences("rei_report", Context.MODE_PRIVATE)
 
@@ -99,6 +100,45 @@ class ReportRepository(context: Context) {
 
     fun loadDeviceStatuses(): List<DeviceSyncStatus> =
         CentralSyncClient(appContext).fetchDeviceStatuses().getOrDefault(emptyList())
+
+    fun latestChatSession(reportId: String): ChatSessionEntity? = runBlocking(Dispatchers.IO) {
+        chatDao.latestSession(reportId)
+    }
+
+    fun chatSession(sessionId: String): ChatSessionEntity? = runBlocking(Dispatchers.IO) {
+        chatDao.session(sessionId)
+    }
+
+    fun createLocalChatSession(reportId: String, skillCode: String): ChatSessionEntity = runBlocking(Dispatchers.IO) {
+        chatDao.latestSession(reportId)?.takeIf { it.skillCode == skillCode } ?: ChatSessionEntity(
+            id = UUID.randomUUID().toString(), reportId = reportId, skillCode = skillCode,
+            createdAt = System.currentTimeMillis(), updatedAt = System.currentTimeMillis(),
+            syncStatus = ChatSessionEntity.PENDING
+        ).also(chatDao::upsertSession)
+    }
+
+    fun markRemoteChatSession(sessionId: String, serverId: String) = writes.execute {
+        chatDao.markRemoteSession(sessionId, serverId, System.currentTimeMillis())
+    }
+
+    fun loadChatMessages(sessionId: String): List<ChatMessageEntity> = runBlocking(Dispatchers.IO) {
+        chatDao.messages(sessionId)
+    }
+
+    fun saveChatMessage(message: ChatMessageEntity) = writes.execute { chatDao.upsertMessage(message) }
+
+    fun updateChatMessage(
+        id: String, status: String, sentAt: Long? = null, receivedAt: Long? = null,
+        serverResponseId: String = "", errorMessage: String? = null
+    ) = writes.execute { chatDao.updateStatus(id, status, sentAt, receivedAt, serverResponseId, errorMessage) }
+
+    fun retryChatMessage(id: String) = writes.execute { chatDao.retry(id) }
+
+    fun pendingChatMessages(limit: Int = 20): List<ChatMessageEntity> = runBlocking(Dispatchers.IO) {
+        chatDao.pendingMessages(limit)
+    }
+
+    fun pendingChatCount(): Int = runBlocking(Dispatchers.IO) { chatDao.countPending() }
 
     fun loadSupervisorDashboard(filters: SupervisorDashboardFilters): SupervisorDashboard? =
         CentralSyncClient(appContext).fetchSupervisorDashboard(filters).getOrNull()

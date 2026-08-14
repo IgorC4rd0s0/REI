@@ -39,6 +39,21 @@ Para remover:
 - exportação para BI: `/api/bi/reports.csv`;
 - verificação do servidor: `/health`.
 
+## Assistente contextual
+
+O chat do levantamento usa somente quatro Skills versionadas em `server/skills/` e persiste sessões,
+mensagens e sugestões no SQLite central. Rotas autenticadas:
+
+- `POST /api/levantamentos/{id}/chat/sessoes`;
+- `POST /api/levantamentos/{id}/chat/mensagens`;
+- `GET /api/levantamentos/{id}/chat/mensagens?sessionId=...`;
+- `POST /api/chat/sugestoes/{id}/confirmar` e `/rejeitar`.
+
+A chave do provedor nunca fica no Android. Para habilitar respostas reais, configure no ambiente do
+servidor `OPENAI_API_KEY`, opcionalmente `OPENAI_MODEL`, `OPENAI_TIMEOUT_SECONDS` e
+`OPENAI_MAX_OUTPUT_TOKENS`. Sem a chave, mensagens são preservadas localmente e a API informa
+`ai_not_configured`; os testes usam mock e não fazem chamadas externas.
+
 `config.json` e `data/` são locais e ignorados pelo Git. Não publique bancos, chaves ou backups.
 
 ## Perfis
