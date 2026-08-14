@@ -1,0 +1,125 @@
+/* Padrão visual compartilhado pelas telas administrativas. */
+body {
+  background: #f5f7fb;
+}
+
+header.topbar {
+  min-height: 62px;
+  padding: 7px clamp(16px, 3vw, 34px);
+  box-shadow: 0 2px 10px rgba(18, 35, 70, .04);
+}
+
+main {
+  width: min(100% - 40px, 1240px);
+  max-width: 1240px;
+  margin: 0 auto;
+  padding: 28px 0 72px;
+}
+
+.hero {
+  padding: 22px 0;
+  margin: 0 0 22px;
+  border: 0;
+  border-radius: 0;
+  color: inherit;
+  background: transparent;
+}
+
+.hero h1 {
+  margin: 0 0 6px;
+  color: inherit;
+  font-size: clamp(26px, 3vw, 34px);
+  line-height: 1.15;
+}
+
+.hero p,
+.hero small {
+  color: var(--muted);
+}
+
+.card,
+.topic,
+.item-switch,
+.requirement-editor {
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: #fff;
+  box-shadow: 0 2px 9px rgba(18, 35, 70, .035);
+}
+
+.card {
+  padding: 22px;
+}
+
+input,
+select,
+textarea {
+  min-height: 44px;
+  border-radius: 12px;
+  background: #fff;
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+  border-color: #1769c2;
+  outline: 0;
+  box-shadow: 0 0 0 3px rgba(23, 105, 194, .12);
+}
+
+table {
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 15px;
+}
+
+tbody tr:hover td {
+  background: #f7f9fd;
+}
+
+.modal {
+  background: rgba(10, 18, 38, .54);
+  backdrop-filter: blur(3px);
+}
+
+.modal .card,
+.field-edit[open] form {
+  border-radius: 18px;
+  box-shadow: 0 24px 70px rgba(10, 18, 38, .28);
+}
+
+html[data-theme="dark"] body {
+  background: #0b1220;
+}
+
+html[data-theme="dark"] .hero {
+  border: 0;
+  color: #f7f9ff;
+  background: transparent;
+}
+
+html[data-theme="dark"] .card,
+html[data-theme="dark"] .topic,
+html[data-theme="dark"] .item-switch,
+html[data-theme="dark"] .requirement-editor {
+  background: #151d2d;
+}
+
+html[data-theme="dark"] tbody tr:hover td {
+  background: #1b263a;
+}
+
+@media(max-width:700px) {
+  main {
+    width: min(100% - 24px, 1240px);
+    padding-top: 18px;
+  }
+
+  .hero {
+    padding: 16px 0;
+  }
+
+  .card {
+    padding: 16px;
+  }
+}

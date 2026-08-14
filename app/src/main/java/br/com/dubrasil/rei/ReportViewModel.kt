@@ -17,6 +17,11 @@ import br.com.dubrasil.rei.data.SyncDiagnostic
 import br.com.dubrasil.rei.data.SupervisorDashboard
 import br.com.dubrasil.rei.data.SupervisorDashboardFilters
 import br.com.dubrasil.rei.data.AuthStore
+import br.com.dubrasil.rei.data.ChatClient
+import br.com.dubrasil.rei.data.ChatMessageEntity
+import br.com.dubrasil.rei.data.ChatSessionEntity
+import br.com.dubrasil.rei.data.ChatAssistantResponse
+import br.com.dubrasil.rei.data.ChatSendResult
 import br.com.dubrasil.rei.model.ReportData
 import br.com.dubrasil.rei.model.ReportAttachment
 import br.com.dubrasil.rei.model.ImplementationSummary
@@ -25,6 +30,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.UUID
+import org.json.JSONObject
 
 /**
  * Estado central das telas Android.
@@ -54,6 +60,14 @@ class ReportViewModel(application: Application) : AndroidViewModel(application) 
     var supervisorFilters by mutableStateOf(SupervisorDashboardFilters())
         private set
     var isDashboardLoading by mutableStateOf(false)
+        private set
+    var chatSession by mutableStateOf<ChatSessionEntity?>(null)
+        private set
+    var chatMessages by mutableStateOf<List<ChatMessageEntity>>(emptyList())
+        private set
+    var chatLoading by mutableStateOf(false)
+        private set
+    var chatError by mutableStateOf<String?>(null)
         private set
 
     init {
@@ -344,16 +358,102 @@ class ReportViewModel(application: Application) : AndroidViewModel(application) 
         serverMessage = null
     }
 
-    private fun deliveryChecklistCount(data: ReportData) =
-        listOf(
-            "dados" to listOf(br.com.dubrasil.rei.model.ChecklistGroup("modulos", ReportSchema.contractedModules)),
-            "tecnico" to ReportSchema.technical,
-            "estoque" to ReportSchema.stock,
-            "financeiro" to ReportSchema.finance,
-            "fiscal" to ReportSchema.fiscalReports
-        ).sumOf { (scope, groups) ->
-            groups.sumOf { group -> group.items.count { ReportSchema.isChecked(data, scope, group.title, it) } }
+    fun openChat(reportId: String, skillCode: String = "erp-levantamento-diagnostico") {
+        viewModelScope.launch(Dispatchers.IO) {
+            val session = repository.latestChatSession(reportId)
+                ?.takeIf { it.skillCode == skillCode }
+                ?: repository.createLocalChatSession(reportId, skillCode)
+            val messages = repository.loadChatMessages(session.id)
+            withContext(Dispatchers.Main) {
+                chatSession = session
+                chatMessages = messages
+                chatError = null
+            }
         }
+    }
+
+    fun changeChatSkill(reportId: String, skillCode: String) {
+        openChat(reportId, skillCode)
+    }
+
+    fun sendChatMessage(reportId: String, content: String) {
+        val text = content.trim()
+        if (text.isBlank() || chatLoading) return
+        val session = chatSession ?: repository.createLocalChatSession(reportId, "erp-levantamento-diagnostico").also { chatSession = it }
+        val now = System.currentTimeMillis()
+        val message = ChatMessageEntity(
+            id = UUID.randomUUID().toString(), localIdempotencyKey = UUID.randomUUID().toString(),
+            sessionId = session.id, reportId = reportId, role = ChatMessageEntity.ROLE_USER,
+            content = text, status = ChatMessageEntity.STATUS_PENDING, createdAt = now
+        )
+        repository.saveChatMessage(message)
+        chatMessages = chatMessages + message
+        chatError = null
+        if (!hasInternetNetwork()) {
+            chatError = "Sem conexão: mensagem salva no dispositivo e será enviada quando a rede voltar."
+            return
+        }
+        dispatchChatMessage(reportId, session, message)
+    }
+
+    fun retryChatMessage(reportId: String, messageId: String) {
+        repository.retryChatMessage(messageId)
+        chatMessages = chatMessages.map { if (it.id == messageId) it.copy(status = ChatMessageEntity.STATUS_PENDING, errorMessage = null) else it }
+        val message = chatMessages.firstOrNull { it.id == messageId }
+        val session = message?.let { repository.chatSession(it.sessionId) }
+        if (message != null && session != null && hasInternetNetwork()) dispatchChatMessage(reportId, session, message)
+    }
+
+    private fun dispatchChatMessage(reportId: String, session: ChatSessionEntity, message: ChatMessageEntity) {
+        chatLoading = true
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                val client = ChatClient(getApplication())
+                var remoteId = session.serverConversationId
+                if (remoteId.isBlank()) {
+                    val created = client.createSession(reportId, session.skillCode).getOrElse { error ->
+                        repository.updateChatMessage(message.id, ChatMessageEntity.STATUS_FAILED, errorMessage = error.message)
+                        return@withContext Result.failure<ChatSendResult>(error)
+                    }
+                    remoteId = created.id
+                    repository.markRemoteChatSession(session.id, remoteId)
+                }
+                client.sendMessage(reportId, remoteId, message.localIdempotencyKey, message.content)
+                    .onSuccess { response ->
+                        repository.updateChatMessage(message.id, ChatMessageEntity.STATUS_SENT, sentAt = System.currentTimeMillis(), serverResponseId = response.messageId)
+                        response.response?.let { assistant ->
+                            repository.saveChatMessage(ChatMessageEntity(
+                                id = UUID.randomUUID().toString(), localIdempotencyKey = "${message.localIdempotencyKey}:assistant",
+                                sessionId = session.id, reportId = reportId, role = ChatMessageEntity.ROLE_ASSISTANT,
+                                content = assistant.toJson().toString(), status = ChatMessageEntity.STATUS_RECEIVED,
+                                createdAt = System.currentTimeMillis(), receivedAt = System.currentTimeMillis(), serverResponseId = response.messageId
+                            ))
+                        }
+                    }
+                    .map { it }
+            }
+            chatMessages = withContext(Dispatchers.IO) { repository.loadChatMessages(session.id) }
+            chatError = result.exceptionOrNull()?.message
+            chatLoading = false
+        }
+    }
+
+    fun clearChatError() { chatError = null }
+
+    private fun ChatAssistantResponse.toJson() = JSONObject().apply {
+        put("answer", answer); put("questions", questions); put("facts", facts); put("pending_items", pendingItems)
+        put("risks", risks); put("suggestions", suggestions); put("evidence_ids", evidenceIds)
+        put("requires_confirmation", requiresConfirmation); put("confidence", confidence); put("skill_code", skillCode)
+    }
+
+    private fun deliveryChecklistCount(data: ReportData) = ReportSchema.deliveryChecklistCount(data)
+
+    private fun hasInternetNetwork(): Boolean {
+        val manager = getApplication<Application>().getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        val network = manager.activeNetwork ?: return false
+        val capabilities = manager.getNetworkCapabilities(network) ?: return false
+        return capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+    }
 
     private fun update(value: ReportData) {
         report = value

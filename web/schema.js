@@ -94,7 +94,7 @@ window.REI_SCHEMA = {
   moduleKey(item) { return this.key("dados", "modulos", item); },
   allDeliveryKeys() {
     return [
-      ...this.modules.map(item => this.moduleKey(this.itemLabel(item))),
+      ...this.modules.map(item => this.moduleKey(item)),
       ...["technical:tecnico", "stock:estoque", "finance:financeiro", "fiscal:fiscal"].flatMap(pair => {
         const [name, scope] = pair.split(":");
         return this[name].flatMap(([group, items]) => items.filter(item => !(item && typeof item === "object") || (item.type || "text") === "checkbox").map(item => this.key(scope, group, item)));

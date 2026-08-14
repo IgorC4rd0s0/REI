@@ -8,7 +8,8 @@ data class AuthUser(
     val id: Int,
     val username: String,
     val fullName: String,
-    val role: String
+    val role: String,
+    val photoData: String = ""
 ) {
     val isSupervisor: Boolean get() = role == "supervisor"
 }
@@ -53,7 +54,8 @@ class AuthStore(context: Context) {
         if (username.isBlank() || role !in setOf("supervisor", "implantador")) return null
         return AuthUser(
             prefs.getInt("user_id", 0), username,
-            prefs.getString("full_name", username).orEmpty(), role
+            prefs.getString("full_name", username).orEmpty(), role,
+            prefs.getString("photo_data", "").orEmpty()
         )
     }
 
@@ -65,6 +67,7 @@ class AuthStore(context: Context) {
             .putString("username", session.user.username)
             .putString("full_name", session.user.fullName)
             .putString("role", session.user.role)
+            .putString("photo_data", session.user.photoData)
             .apply()
     }
 
